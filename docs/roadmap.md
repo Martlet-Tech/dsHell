@@ -28,6 +28,6 @@
 
 - 托盘图标：状态、显示/隐藏、退出
 - 记住上次窗口大小和位置
-- 首次运行环境体检：检测 node / npm / dsh 是否存在及版本，缺失时给明确指引（官网链接 / winget 命令），而不是只报错
-- WebView2 runtime 缺失检测（Win10 老版本可能没有）
+- WebView2 runtime **完全缺失**时的兜底：现在启动页只能展示版本与过低告警；
+  真正缺失时窗口根本建不出来，需要原生对话框（Win32 TaskDialog）给下载指引
 - web / headless 两个 profile 切换

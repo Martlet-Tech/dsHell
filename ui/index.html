@@ -12,6 +12,10 @@
         --accent: #5b8cff;
         --accent2: #22d3ee;
         --violet: #8b5cf6;
+        --ok: #34d399;
+        --warn: #fbbf24;
+        --err: #f87171;
+        --line: rgba(255, 255, 255, .07);
       }
 
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -25,7 +29,7 @@
         -webkit-font-smoothing: antialiased;
       }
 
-      /* The whole splash fades out as one unit when the shell hands off to DSH. */
+      /* handoff 前整页淡出（沿用原来的 leave()） */
       #stage {
         position: fixed;
         inset: 0;
@@ -42,25 +46,19 @@
         pointer-events: none;
       }
 
-      /* --- ambient background: two slow drifting glows + a fine grid --- */
-      .glow {
-        position: absolute;
-        border-radius: 50%;
-        filter: blur(90px);
-        opacity: .5;
-        will-change: transform;
-      }
+      /* --- ambient background --- */
+      .glow { position: absolute; border-radius: 50%; filter: blur(90px); opacity: .45; will-change: transform; }
       .glow.a {
-        width: 46vw; height: 46vw;
-        background: radial-gradient(circle, rgba(91,140,255,.55), transparent 68%);
-        top: -14vw; left: -8vw;
-        animation: drift-a 17s ease-in-out infinite alternate;
+        width: 44vw; height: 44vw;
+        background: radial-gradient(circle, rgba(91,140,255,.5), transparent 68%);
+        top: -16vw; left: -10vw;
+        animation: drift-a 19s ease-in-out infinite alternate;
       }
       .glow.b {
-        width: 40vw; height: 40vw;
-        background: radial-gradient(circle, rgba(139,92,246,.45), transparent 68%);
-        bottom: -14vw; right: -8vw;
-        animation: drift-b 21s ease-in-out infinite alternate;
+        width: 38vw; height: 38vw;
+        background: radial-gradient(circle, rgba(139,92,246,.42), transparent 68%);
+        bottom: -16vw; right: -10vw;
+        animation: drift-b 23s ease-in-out infinite alternate;
       }
       @keyframes drift-a {
         from { transform: translate3d(0,0,0) scale(1); }
@@ -70,184 +68,203 @@
         from { transform: translate3d(0,0,0) scale(1.06); }
         to   { transform: translate3d(-6vw, -4vw, 0) scale(1); }
       }
-
       .grid {
-        position: absolute;
-        inset: -2px;
+        position: absolute; inset: -2px;
         background-image:
           linear-gradient(rgba(255,255,255,.030) 1px, transparent 1px),
           linear-gradient(90deg, rgba(255,255,255,.030) 1px, transparent 1px);
         background-size: 46px 46px;
-        mask-image: radial-gradient(circle at 50% 46%, #000 0%, transparent 72%);
-        -webkit-mask-image: radial-gradient(circle at 50% 46%, #000 0%, transparent 72%);
+        mask-image: radial-gradient(circle at 50% 42%, #000 0%, transparent 74%);
+        -webkit-mask-image: radial-gradient(circle at 50% 42%, #000 0%, transparent 74%);
       }
 
-      /* --- center stack --- */
-      .center {
+      /* --- card --- */
+      .card {
         position: relative;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 30px;
+        width: min(760px, 92vw);
+        max-height: 86vh;
+        overflow: auto;
+        padding: 26px 28px 22px;
+        border-radius: 18px;
+        background: linear-gradient(180deg, rgba(18,23,38,.86), rgba(10,13,22,.9));
+        border: 1px solid var(--line);
+        box-shadow:
+          0 0 0 1px rgba(91,140,255,.07),
+          0 30px 80px -30px rgba(0,0,0,.95),
+          inset 0 1px 0 rgba(255,255,255,.05);
+        backdrop-filter: blur(12px);
       }
 
-      /* pulsing ring + orbiting comet around the mark */
-      .mark-wrap {
-        position: relative;
-        width: 132px; height: 132px;
-        display: grid;
-        place-items: center;
-      }
-      .pulse {
-        position: absolute;
-        inset: 0;
-        border-radius: 50%;
-        border: 1px solid rgba(91,140,255,.55);
-        animation: pulse 2.9s cubic-bezier(.22,1,.36,1) infinite;
-      }
-      .pulse:nth-child(2) { animation-delay: .95s; }
-      .pulse:nth-child(3) { animation-delay: 1.9s; }
-      @keyframes pulse {
-        0%   { transform: scale(.62); opacity: 0; }
-        22%  { opacity: .8; }
-        100% { transform: scale(1.5); opacity: 0; }
-      }
-
-      .orbit {
-        position: absolute;
-        inset: 0;
-        animation: spin 3.4s linear infinite;
-      }
-      @keyframes spin { to { transform: rotate(360deg); } }
-      .comet {
-        position: absolute;
-        top: -3px; left: 50%;
-        width: 6px; height: 6px;
-        margin-left: -3px;
-        border-radius: 50%;
-        background: var(--accent2);
-        box-shadow: 0 0 14px 3px rgba(34,211,238,.85);
-      }
-
-      /* the mark itself: a rounded square with a sheen sweeping across it */
+      header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
       .mark {
         position: relative;
-        width: 76px; height: 76px;
-        border-radius: 22px;
+        width: 42px; height: 42px;
+        flex: 0 0 42px;
+        border-radius: 13px;
         background: linear-gradient(145deg, #131a2c, #0b1020);
         border: 1px solid rgba(255,255,255,.09);
-        box-shadow:
-          0 0 0 1px rgba(91,140,255,.10),
-          0 18px 46px -14px rgba(0,0,0,.9),
-          inset 0 1px 0 rgba(255,255,255,.07);
-        display: grid;
-        place-items: center;
+        display: grid; place-items: center;
         overflow: hidden;
+        box-shadow: 0 0 0 1px rgba(91,140,255,.10), inset 0 1px 0 rgba(255,255,255,.07);
       }
-      .mark svg { width: 38px; height: 38px; display: block; }
+      .mark svg { width: 22px; height: 22px; display: block; }
       .mark::after {
         content: "";
-        position: absolute;
-        top: -60%; left: -120%;
+        position: absolute; top: -60%; left: -120%;
         width: 60%; height: 220%;
-        background: linear-gradient(100deg, transparent, rgba(255,255,255,.30), transparent);
+        background: linear-gradient(100deg, transparent, rgba(255,255,255,.26), transparent);
         transform: rotate(16deg);
-        animation: sheen 2.8s ease-in-out infinite;
+        animation: sheen 3.4s ease-in-out infinite;
       }
-      @keyframes sheen {
-        0%   { left: -120%; }
-        55%  { left: 150%; }
-        100% { left: 150%; }
-      }
+      @keyframes sheen { 0% { left: -120%; } 55% { left: 150%; } 100% { left: 150%; } }
 
-      /* --- wordmark + flowing underline --- */
       .word {
-        font-size: 27px;
-        font-weight: 600;
-        letter-spacing: .16em;
-        text-indent: .16em;
+        font-size: 19px; font-weight: 600; letter-spacing: .18em;
         background: linear-gradient(92deg, #ffffff 0%, #a9c2ff 42%, #6ee7ff 62%, #ffffff 100%);
         background-size: 260% 100%;
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
-        animation: flow 3.6s linear infinite;
+        -webkit-background-clip: text; background-clip: text; color: transparent;
+        animation: flow 4s linear infinite;
       }
-      @keyframes flow {
-        0%   { background-position: 130% 0; }
-        100% { background-position: -130% 0; }
-      }
+      @keyframes flow { 0% { background-position: 130% 0; } 100% { background-position: -130% 0; } }
+      .sub { font-size: 10.5px; letter-spacing: .13em; color: rgba(107,116,136,.85); margin-top: 3px; }
 
-      .rule {
+      /* --- step timeline --- */
+      ol#steps { list-style: none; }
+      .step {
+        display: grid;
+        grid-template-columns: 20px 1fr auto;
+        gap: 12px;
+        align-items: start;
+        padding: 11px 2px;
+        border-top: 1px solid var(--line);
+      }
+      .step:first-child { border-top: none; }
+
+      .ico {
+        width: 18px; height: 18px; margin-top: 2px;
+        border-radius: 50%;
+        border: 1.5px solid rgba(255,255,255,.16);
+        display: grid; place-items: center;
+        font-size: 10px; font-weight: 700; line-height: 1;
+        color: transparent;
+      }
+      .step[data-state="ok"] .ico { border-color: rgba(52,211,153,.85); background: rgba(52,211,153,.13); color: var(--ok); }
+      .step[data-state="ok"] .ico::before { content: "✓"; }
+      .step[data-state="missing"] .ico,
+      .step[data-state="failed"] .ico { border-color: rgba(248,113,113,.85); background: rgba(248,113,113,.13); color: var(--err); }
+      .step[data-state="missing"] .ico::before,
+      .step[data-state="failed"] .ico::before { content: "✕"; }
+      .step[data-state="warn"] .ico { border-color: rgba(251,191,36,.85); background: rgba(251,191,36,.13); color: var(--warn); }
+      .step[data-state="warn"] .ico::before { content: "!"; }
+      .step[data-state="checking"] .ico {
+        border-color: transparent;
+        border-top-color: var(--accent2);
+        border-right-color: var(--accent2);
+        animation: spin .8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .step b { font-size: 13.5px; font-weight: 600; display: block; }
+      .step .detail {
+        display: block;
+        font-size: 12px;
+        color: var(--dim);
+        margin-top: 3px;
+        word-break: break-all;
+        font-variant-numeric: tabular-nums;
+      }
+      .step[data-state="missing"] .detail,
+      .step[data-state="failed"] .detail { color: #fca5a5; }
+      .step[data-state="warn"] .detail { color: #fcd34d; }
+
+      .hint { margin-top: 7px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .hint:empty { display: none; }
+      .hint code {
+        font-family: "Cascadia Mono", Consolas, monospace;
+        font-size: 11px;
+        color: #dbe2f0;
+        background: rgba(255,255,255,.055);
+        border: 1px solid var(--line);
+        padding: 3px 7px;
+        border-radius: 6px;
+      }
+      .hint a { font-size: 11px; color: var(--accent2); text-decoration: none; opacity: .9; }
+      .hint a:hover { text-decoration: underline; }
+
+      button {
+        font-family: inherit;
+        font-size: 12px;
+        color: var(--ink);
+        background: rgba(255,255,255,.055);
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 8px;
+        padding: 5px 11px;
+        cursor: pointer;
+        transition: background 160ms ease, border-color 160ms ease, transform 120ms ease;
+      }
+      button:hover:not(:disabled) { background: rgba(91,140,255,.16); border-color: rgba(91,140,255,.45); }
+      button:active:not(:disabled) { transform: translateY(1px); }
+      button:disabled { opacity: .42; cursor: default; }
+      .acts button { font-size: 11.5px; padding: 4px 10px; }
+
+      /* --- install panel --- */
+      .panel {
+        margin-top: 14px;
+        padding: 13px 14px;
+        border-radius: 12px;
+        background: rgba(91,140,255,.05);
+        border: 1px solid rgba(91,140,255,.18);
+      }
+      .panel .row { display: flex; align-items: baseline; gap: 10px; font-size: 12px; }
+      .panel .row .grow { flex: 1; }
+      #inst-pct { font-variant-numeric: tabular-nums; color: var(--accent2); }
+      #inst-elapsed { font-variant-numeric: tabular-nums; color: var(--dim); font-size: 11px; }
+      .bar {
         position: relative;
-        width: 156px; height: 2px;
-        border-radius: 2px;
+        height: 5px;
+        margin: 10px 0 10px;
+        border-radius: 4px;
         background: rgba(255,255,255,.07);
         overflow: hidden;
       }
-      .rule::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        width: 42%;
-        border-radius: 2px;
-        background: linear-gradient(90deg, transparent, var(--accent), var(--accent2), transparent);
-        animation: sweep 1.55s cubic-bezier(.65,.05,.36,1) infinite;
+      .bar i {
+        display: block; height: 100%; width: 0;
+        border-radius: 4px;
+        background: linear-gradient(90deg, var(--accent), var(--accent2));
+        transition: width 260ms ease;
+      }
+      .bar i.indeterminate {
+        width: 38% !important;
+        animation: sweep 1.4s cubic-bezier(.65,.05,.36,1) infinite;
       }
       @keyframes sweep {
-        0%   { transform: translateX(-105%); }
+        0% { transform: translateX(-105%); }
         100% { transform: translateX(345%); }
       }
-
-      .status {
-        font-size: 12.5px;
-        letter-spacing: .055em;
-        color: var(--dim);
-        min-height: 1.2em;
-        transition: color 200ms ease;
-      }
-      .status.warn { color: #fbbf24; }
-      .status.err  { color: #f87171; }
-
-      /* elapsed seconds, so a slow start never looks frozen */
-      .tick { font-variant-numeric: tabular-nums; opacity: .5; }
-
-      .dots::after {
-        content: "";
-        animation: dots 1.4s steps(4, end) infinite;
-      }
-      @keyframes dots {
-        0%   { content: ""; }
-        25%  { content: "."; }
-        50%  { content: ".."; }
-        75%  { content: "..."; }
-        100% { content: ""; }
+      pre#inst-log {
+        max-height: 168px;
+        overflow: auto;
+        font-family: "Cascadia Mono", Consolas, monospace;
+        font-size: 10.5px;
+        line-height: 1.55;
+        color: #9fb0cc;
+        white-space: pre-wrap;
+        word-break: break-all;
       }
 
-      .brand {
-        position: fixed;
-        left: 0; right: 0; bottom: 22px;
-        text-align: center;
-        font-size: 11px;
-        letter-spacing: .12em;
-        color: rgba(107,116,136,.55);
-      }
-
-      /* failure card, revealed only if the backend never announces itself */
+      /* --- fail card --- */
       .fail {
-        max-width: 520px;
-        margin-top: 4px;
-        padding: 18px 20px;
-        border-radius: 14px;
+        display: none;
+        margin-top: 14px;
+        padding: 14px 16px;
+        border-radius: 12px;
         background: rgba(248,113,113,.055);
         border: 1px solid rgba(248,113,113,.24);
         color: #fecaca;
         font-size: 12.5px;
         line-height: 1.65;
-        text-align: left;
         white-space: pre-wrap;
         word-break: break-word;
-        display: none;
       }
       .fail.show { display: block; }
       .fail b { color: #fca5a5; }
@@ -260,11 +277,42 @@
         border-radius: 4px;
       }
 
+      /* --- actions --- */
+      #actions { display: flex; gap: 10px; margin-top: 18px; }
+      #actions button { flex: 1; padding: 9px 14px; font-size: 13px; }
+      #btn-install {
+        background: linear-gradient(180deg, rgba(91,140,255,.28), rgba(91,140,255,.16));
+        border-color: rgba(91,140,255,.5);
+      }
+      #btn-quit.ghost { flex: 0 0 110px; }
+      #skip {
+        display: block;
+        margin-top: 12px;
+        text-align: center;
+        font-size: 11px;
+        color: rgba(107,116,136,.7);
+        text-decoration: none;
+        cursor: pointer;
+      }
+      #skip:hover { color: var(--dim); text-decoration: underline; }
+
+      .toast {
+        position: fixed;
+        left: 50%;
+        bottom: 26px;
+        transform: translateX(-50%);
+        max-width: 80vw;
+        padding: 9px 14px;
+        border-radius: 9px;
+        font-size: 12px;
+        color: #fecaca;
+        background: rgba(30,10,14,.94);
+        border: 1px solid rgba(248,113,113,.35);
+      }
+
       @media (prefers-reduced-motion: reduce) {
-        .glow, .pulse, .orbit, .mark::after, .word, .rule::after, .dots::after {
-          animation: none !important;
-        }
-        .rule::after { width: 100%; opacity: .6; }
+        .glow, .mark::after, .word, .bar i.indeterminate { animation: none !important; }
+        .step[data-state="checking"] .ico { animation-duration: 1.6s; }
       }
     </style>
   </head>
@@ -274,12 +322,8 @@
       <div class="glow b"></div>
       <div class="grid"></div>
 
-      <div class="center">
-        <div class="mark-wrap">
-          <div class="pulse"></div>
-          <div class="pulse"></div>
-          <div class="pulse"></div>
-          <div class="orbit"><div class="comet"></div></div>
+      <div class="card">
+        <header>
           <div class="mark">
             <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
               <defs>
@@ -293,41 +337,68 @@
               <path d="M19.5 7.5c4.6 0 7.2 2.4 7.2 6.1 0 3.9-2.9 6.4-7.6 6.4h-3" stroke="url(#g)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
           </div>
+          <div>
+            <div class="word">DSHELL</div>
+            <div class="sub">DEEPSEEK HARNESS · DESKTOP SHELL</div>
+          </div>
+        </header>
+
+        <ol id="steps"></ol>
+
+        <section id="install" class="panel" hidden>
+          <div class="row">
+            <span class="grow" id="inst-title">正在安装</span>
+            <span id="inst-pct"></span>
+            <span id="inst-elapsed"></span>
+            <button id="inst-cancel" disabled>取消</button>
+          </div>
+          <div class="bar"><i id="inst-bar"></i></div>
+          <pre id="inst-log"></pre>
+        </section>
+
+        <div id="fail" class="fail"></div>
+
+        <div id="actions">
+          <button id="btn-install" disabled>一键安装</button>
+          <button id="btn-quit" class="ghost">退出</button>
         </div>
 
-        <div class="word">DSHELL</div>
-        <div class="rule"></div>
-        <div class="status" id="status">正在启动 DeepSeek Harness<span class="dots"></span> <span class="tick" id="tick"></span></div>
-        <div class="fail" id="fail"></div>
+        <a id="skip" hidden>跳过检查，直接启动</a>
       </div>
     </div>
 
-    <div class="brand">DEEPSEEK HARNESS · DESKTOP SHELL</div>
+    <div id="toast" class="toast" hidden></div>
 
     <script>
-      // The Rust side drives this page through window.eval() with base64 payloads:
-      //   __dshell.statusB64(b64)  -> replace the status line (plain text)
-      //   __dshell.failB64(b64)    -> show the failure card (authored HTML)
-      //   __dshell.leave()         -> fade the splash out (called right before navigate)
-      //
-      // Base64 is used because the text crosses a JS string literal and then
-      // innerHTML; encoding it means no amount of quotes or angle brackets in a
-      // dsh error message can break out of either context.
+      // 两条通道，职责不重叠：
+      //   ① window.__dshell.*  —— 老通道（Rust 单向 eval + base64），只负责 handoff
+      //      的淡出与失败卡片。已验证过的链路，一行没动。
+      //   ② doctor://* install://* 事件 + invoke —— 新的体检/安装双向通道。
+      //      页面加载完注册好监听后主动 invoke('doctor_run')，这样事件不会丢。
       (function () {
-        const stage = document.getElementById("stage");
-        const statusEl = document.getElementById("status");
-        const tickEl = document.getElementById("tick");
-        const failEl = document.getElementById("fail");
-        const started = Date.now();
+        const LABELS = {
+          webview: "WebView2 运行环境",
+          node: "Node.js 运行时",
+          npm: "npm 包管理器",
+          dsh: "dsh 命令行（DeepSeek Harness）",
+          profile: "dsh 配置目录可写",
+          launch: "启动 DeepSeek Harness",
+        };
+        const PICKABLE = ["node", "npm", "dsh"];
+
+        const $ = (s) => document.querySelector(s);
+        const stage = $("#stage");
+        const stepsEl = $("#steps");
+        const failEl = $("#fail");
+        const panel = $("#install");
+        const barEl = $("#inst-bar");
+        const logEl = $("#inst-log");
+        const btnInstall = $("#btn-install");
+        const btnQuit = $("#btn-quit");
+        const skipEl = $("#skip");
+        const toastEl = $("#toast");
         let done = false;
 
-        const timer = setInterval(() => {
-          if (done) return;
-          const s = Math.floor((Date.now() - started) / 1000);
-          tickEl.textContent = s >= 2 ? s + "s" : "";
-        }, 400);
-
-        // Decode base64 -> UTF-8 string, correctly handling non-ASCII (Chinese).
         function decode(b64) {
           const bin = atob(b64);
           const bytes = new Uint8Array(bin.length);
@@ -335,35 +406,227 @@
           return new TextDecoder("utf-8").decode(bytes);
         }
 
-        function escapeHtml(s) {
-          return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        function toast(msg) {
+          toastEl.textContent = msg;
+          toastEl.hidden = false;
+          clearTimeout(toastEl._t);
+          toastEl._t = setTimeout(() => (toastEl.hidden = true), 6000);
         }
 
+        // ── 老通道（保持原样）──────────────────────────────
         window.__dshell = {
           statusB64(payload) {
-            const text = decode(payload);
-            statusEl.className = "status";
-            statusEl.innerHTML =
-              escapeHtml(text) + '<span class="dots"></span> <span class="tick"></span>';
-            const s = Math.floor((Date.now() - started) / 1000);
-            statusEl.querySelector(".tick").textContent = s >= 2 ? s + "s" : "";
+            const li = ensureRow("launch");
+            li.dataset.state = "checking";
+            li.querySelector(".detail").textContent = decode(payload);
           },
           leave() {
             done = true;
-            clearInterval(timer);
             stage.classList.add("leaving");
           },
           failB64(payload) {
-            done = true;
-            clearInterval(timer);
-            statusEl.className = "status err";
-            statusEl.textContent = "启动失败";
+            const li = ensureRow("launch");
+            li.dataset.state = "failed";
+            li.querySelector(".detail").textContent = "启动失败";
             failEl.className = "fail show";
-            // Authored in main.rs, not user input: render as markup, but turn
-            // newlines into breaks so the bullet list keeps its shape.
             failEl.innerHTML = decode(payload).replace(/\n/g, "<br>");
-          }
+          },
         };
+
+        // ── 步骤时间线 ────────────────────────────────────
+        function ensureRow(id) {
+          let li = stepsEl.querySelector('.step[data-id="' + id + '"]');
+          if (li) return li;
+          li = document.createElement("li");
+          li.className = "step";
+          li.dataset.id = id;
+          li.dataset.state = "pending";
+          li.innerHTML =
+            '<span class="ico"></span>' +
+            '<div class="body"><b></b><span class="detail"></span><div class="hint"></div></div>' +
+            '<div class="acts"></div>';
+          li.querySelector("b").textContent = LABELS[id] || id;
+          stepsEl.appendChild(li);
+          return li;
+        }
+
+        function renderStep(s) {
+          if (!s || !s.id) return;
+          const li = ensureRow(s.id);
+          li.dataset.state = s.state || "pending";
+          if (s.label) li.querySelector("b").textContent = s.label;
+          li.querySelector(".detail").textContent = s.detail || "";
+          if (done) return;
+
+          const acts = li.querySelector(".acts");
+          acts.textContent = "";
+          if (PICKABLE.indexOf(s.id) >= 0) {
+            const b = document.createElement("button");
+            b.textContent = "指定…";
+            b.onclick = () => pick(s.id, b);
+            acts.appendChild(b);
+          }
+
+          const hint = li.querySelector(".hint");
+          hint.textContent = "";
+          const showHint =
+            s.hint && (s.state === "missing" || s.state === "failed" || s.state === "warn");
+          if (showHint) {
+            if (s.hint.command) {
+              const code = document.createElement("code");
+              code.textContent = s.hint.command;
+              hint.appendChild(code);
+              const cp = document.createElement("button");
+              cp.textContent = "复制";
+              cp.style.fontSize = "11px";
+              cp.style.padding = "3px 8px";
+              cp.onclick = async () => {
+                try {
+                  await navigator.clipboard.writeText(s.hint.command);
+                  cp.textContent = "已复制";
+                } catch (_) {
+                  cp.textContent = "复制失败";
+                }
+                setTimeout(() => (cp.textContent = "复制"), 1400);
+              };
+              hint.appendChild(cp);
+            }
+            if (s.hint.url) {
+              const a = document.createElement("a");
+              a.href = s.hint.url;
+              a.textContent = "官方页面";
+              hint.appendChild(a);
+            }
+          }
+        }
+
+        // ── 「指定…」：原生选择器 + Rust 侧就地验证 ──────────
+        async function pick(id, btn) {
+          const T = window.__TAURI__;
+          if (!T) return;
+          try {
+            const p = await T.dialog.open({
+              multiple: false,
+              directory: false,
+              title: "选择 " + id + " 的可执行文件",
+              filters: [{ name: "可执行文件", extensions: ["exe", "cmd", "bat"] }],
+            });
+            if (!p) return;
+            const old = btn.textContent;
+            btn.textContent = "验证中…";
+            btn.disabled = true;
+            try {
+              const step = await T.core.invoke("doctor_set_path", { id: id, path: p });
+              renderStep(step);
+            } finally {
+              btn.textContent = old;
+              btn.disabled = false;
+            }
+          } catch (e) {
+            toast(String(e));
+          }
+        }
+
+        // ── 安装进度 ──────────────────────────────────────
+        function paint(p) {
+          panel.hidden = false;
+          $("#inst-title").textContent = p.phase || "正在安装";
+          $("#inst-elapsed").textContent = ((p.elapsed_ms || 0) / 1000).toFixed(0) + "s";
+          const pct = p.percent;
+          if (pct === null || pct === undefined) {
+            // npm 给不出真实百分比：不编数字，走不确定进度条
+            barEl.classList.add("indeterminate");
+            barEl.style.width = "";
+            $("#inst-pct").textContent = "";
+          } else {
+            barEl.classList.remove("indeterminate");
+            barEl.style.width = pct.toFixed(1) + "%";
+            $("#inst-pct").textContent = pct.toFixed(0) + "%";
+          }
+          logEl.textContent = (p.lines || []).slice(-60).join("\n");
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function installRunning(on) {
+          btnInstall.disabled = on;
+          installPanelCancel(on);
+        }
+
+        function installPanelCancel(on) {
+          $("#inst-cancel").disabled = !on;
+          if (!on) barEl.classList.remove("indeterminate");
+        }
+
+        async function oneClick() {
+          const T = window.__TAURI__;
+          if (!T) return;
+          installRunning(true);
+          panel.hidden = false;
+          $("#inst-title").textContent = "准备安装";
+          logEl.textContent = "";
+          try {
+            await T.core.invoke("install_missing");
+          } catch (e) {
+            toast(String(e));
+          } finally {
+            installRunning(false);
+          }
+        }
+
+        // ── 接线 ─────────────────────────────────────────
+        async function wire() {
+          const T = window.__TAURI__;
+          if (!T) {
+            toast("无法与后端通信（__TAURI__ 未注入），请查看日志文件。");
+            return;
+          }
+          await T.event.listen("doctor://step", (e) => renderStep(e.payload));
+
+          await T.event.listen("doctor://done", (e) => {
+            const p = e.payload || {};
+            const auto = p.auto || [];
+            btnInstall.disabled = auto.length === 0;
+            btnInstall.textContent = auto.length ? "一键安装" : "无需安装";
+            if (p.allOk) {
+              btnInstall.hidden = true;
+              skipEl.hidden = true;
+            } else {
+              btnInstall.hidden = false;
+              skipEl.hidden = false;
+            }
+          });
+
+          await T.event.listen("install://progress", (e) => paint(e.payload));
+
+          await T.event.listen("install://done", (e) => {
+            const p = e.payload || {};
+            if (p.cancelled) {
+              $("#inst-title").textContent = "已取消";
+            } else if (p.ok) {
+              $("#inst-title").textContent = "安装完成，正在复检…";
+            } else {
+              $("#inst-title").textContent = "安装失败";
+              if (p.error) toast(p.error);
+            }
+          });
+
+          $("#inst-cancel").onclick = () => T.core.invoke("install_cancel");
+          btnInstall.onclick = oneClick;
+          btnQuit.onclick = () => T.core.invoke("app_quit");
+          skipEl.onclick = (e) => {
+            e.preventDefault();
+            T.core.invoke("app_skip_doctor");
+          };
+
+          // 监听就绪后再叫体检，事件一条都不会丢
+          T.core.invoke("doctor_run").catch((e) => toast(String(e)));
+        }
+
+        ["webview", "node", "npm", "dsh", "profile"].forEach((id) =>
+          renderStep({ id: id, state: "pending", detail: "等待检查" })
+        );
+
+        wire();
       })();
     </script>
   </body>

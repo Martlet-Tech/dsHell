@@ -38,9 +38,26 @@ cargo build --release
 
 ## 使用
 
-双击运行。日志写在 `%USERPROFILE%\.dshell\dshell-poc.log`。
+双击运行。启动页会先做一次环境体检，逐项汇报：
 
-调试时可以设 `DSHELL_SPLASH_HOLD=1`，程序会停在启动页不跳转，方便截图或调动画。
+```
+① WebView2 运行环境   ② Node.js   ③ npm   ④ dsh   ⑤ dsh 配置目录可写
+```
+
+缺什么就显示什么，并且给得出路：
+
+- **指定…**：单独指定某一项的可执行文件路径（会就地验证一次，通过才记住）
+- **一键安装**：走官方通道补齐（Node 用 `winget`，dsh 用 `npm i -g @deepseek-ai/dsh`），装完自动复检
+- **退出**
+
+全部通过就自动接管：起 `dsh web` → 抓 token URL → 换 cookie → 进入真正的 DSH UI。
+装完/指定过的路径记在 `%USERPROFILE%\.dshell\config.json`，日志写在 `%USERPROFILE%\.dshell\dshell-poc.log`。
+
+调试时可以设 `DSHELL_SPLASH_HOLD=1`：跑完体检但停在报告页不接管，方便截图或调动画。
+
+体检与安装的设计与实测记录见 [docs/closed](docs/closed/)。
+
+![首次运行的环境体检](docs/screenshots/env-helper.png)
 
 ## 文件
 

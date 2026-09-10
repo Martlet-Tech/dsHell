@@ -1,0 +1,79 @@
+name: Release
+
+# 打 tag 推送即发版：push v* → 构建 → 打 zip → 建 Release 挂附件。
+#
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+#
+# 产物名：DShell-<tag>-windows-x86_64.zip（软件名 + 版本号），
+# 只打 zip 不打裸 exe —— 浏览器对直接下载 .exe 会报警，zip 不会。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  EXE_NAME: dshell.exe
+
+jobs:
+  release:
+    name: 构建并打包 Windows zip
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本号在 Cargo.toml 和 tauri.conf.json 各有一份，人肉改容易漏一处。
+      # 漏了就发一个名不副实的 tag，所以这里硬校验：两处都等于 tag 去掉 v。
+      - name: 校验 tag 与版本号一致
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::tag 必须是 v + semver，如 v0.1.0 或 v0.1.0-rc.1（当前：$TAG）"; exit 1 ;;
+          esac
+          VER="${TAG#v}"
+
+          CARGO_VER=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' src-tauri/Cargo.toml | head -1)
+          TAURI_VER=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' src-tauri/tauri.conf.json | head -1)
+
+          echo "tag=$VER  Cargo.toml=$CARGO_VER  tauri.conf.json=$TAURI_VER"
+          [ "$CARGO_VER" = "$VER" ] || { echo "::error::src-tauri/Cargo.toml 版本 $CARGO_VER ≠ tag $VER"; exit 1; }
+          [ "$TAURI_VER" = "$VER" ] || { echo "::error::src-tauri/tauri.conf.json 版本 $TAURI_VER ≠ tag $VER"; exit 1; }
+
+          echo "ZIP_NAME=DShell-${TAG}-windows-x86_64.zip" >> "$GITHUB_ENV"
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 构建 release
+        working-directory: src-tauri
+        run: cargo build --release
+
+      - name: 打 zip 包
+        shell: pwsh
+        run: |
+          $exe = "src-tauri/target/release/$env:EXE_NAME"
+          if (-not (Test-Path $exe)) { throw "找不到产物：$exe" }
+          # 只装一个 exe：DShell 是薄壳，没有依赖目录要跟着分发
+          Compress-Archive -Path $exe -DestinationPath $env:ZIP_NAME -CompressionLevel Optimal
+          Get-Item $env:ZIP_NAME | Select-Object Name, Length
+
+      - name: 建 Release 并上传 zip
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: ${{ env.ZIP_NAME }}
+          # tag 含 - 视为预发布，不设为 latest
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

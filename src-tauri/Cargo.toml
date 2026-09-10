@@ -1,0 +1,18 @@
+[package]
+name = "dshell"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal desktop container for the DeepSeek Harness Web GUI"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

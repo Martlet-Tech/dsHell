@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DShell</title>
+    <style>
+      :root {
+        --bg: #07080c;
+        --ink: #e8ecf6;
+        --dim: #6b7488;
+        --accent: #5b8cff;
+        --accent2: #22d3ee;
+        --violet: #8b5cf6;
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+
+      html, body {
+        height: 100%;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+        overflow: hidden;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* The whole splash fades out as one unit when the shell hands off to DSH. */
+      #stage {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        transition: opacity 460ms cubic-bezier(.22, 1, .36, 1),
+                    transform 460ms cubic-bezier(.22, 1, .36, 1),
+                    filter 460ms ease;
+      }
+      #stage.leaving {
+        opacity: 0;
+        transform: scale(1.035);
+        filter: blur(7px);
+        pointer-events: none;
+      }
+
+      /* --- ambient background: two slow drifting glows + a fine grid --- */
+      .glow {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(90px);
+        opacity: .5;
+        will-change: transform;
+      }
+      .glow.a {
+        width: 46vw; height: 46vw;
+        background: radial-gradient(circle, rgba(91,140,255,.55), transparent 68%);
+        top: -14vw; left: -8vw;
+        animation: drift-a 17s ease-in-out infinite alternate;
+      }
+      .glow.b {
+        width: 40vw; height: 40vw;
+        background: radial-gradient(circle, rgba(139,92,246,.45), transparent 68%);
+        bottom: -14vw; right: -8vw;
+        animation: drift-b 21s ease-in-out infinite alternate;
+      }
+      @keyframes drift-a {
+        from { transform: translate3d(0,0,0) scale(1); }
+        to   { transform: translate3d(6vw, 4vw, 0) scale(1.14); }
+      }
+      @keyframes drift-b {
+        from { transform: translate3d(0,0,0) scale(1.06); }
+        to   { transform: translate3d(-6vw, -4vw, 0) scale(1); }
+      }
+
+      .grid {
+        position: absolute;
+        inset: -2px;
+        background-image:
+          linear-gradient(rgba(255,255,255,.030) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255,255,255,.030) 1px, transparent 1px);
+        background-size: 46px 46px;
+        mask-image: radial-gradient(circle at 50% 46%, #000 0%, transparent 72%);
+        -webkit-mask-image: radial-gradient(circle at 50% 46%, #000 0%, transparent 72%);
+      }
+
+      /* --- center stack --- */
+      .center {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 30px;
+      }
+
+      /* pulsing ring + orbiting comet around the mark */
+      .mark-wrap {
+        position: relative;
+        width: 132px; height: 132px;
+        display: grid;
+        place-items: center;
+      }
+      .pulse {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        border: 1px solid rgba(91,140,255,.55);
+        animation: pulse 2.9s cubic-bezier(.22,1,.36,1) infinite;
+      }
+      .pulse:nth-child(2) { animation-delay: .95s; }
+      .pulse:nth-child(3) { animation-delay: 1.9s; }
+      @keyframes pulse {
+        0%   { transform: scale(.62); opacity: 0; }
+        22%  { opacity: .8; }
+        100% { transform: scale(1.5); opacity: 0; }
+      }
+
+      .orbit {
+        position: absolute;
+        inset: 0;
+        animation: spin 3.4s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .comet {
+        position: absolute;
+        top: -3px; left: 50%;
+        width: 6px; height: 6px;
+        margin-left: -3px;
+        border-radius: 50%;
+        background: var(--accent2);
+        box-shadow: 0 0 14px 3px rgba(34,211,238,.85);
+      }
+
+      /* the mark itself: a rounded square with a sheen sweeping across it */
+      .mark {
+        position: relative;
+        width: 76px; height: 76px;
+        border-radius: 22px;
+        background: linear-gradient(145deg, #131a2c, #0b1020);
+        border: 1px solid rgba(255,255,255,.09);
+        box-shadow:
+          0 0 0 1px rgba(91,140,255,.10),
+          0 18px 46px -14px rgba(0,0,0,.9),
+          inset 0 1px 0 rgba(255,255,255,.07);
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+      }
+      .mark svg { width: 38px; height: 38px; display: block; }
+      .mark::after {
+        content: "";
+        position: absolute;
+        top: -60%; left: -120%;
+        width: 60%; height: 220%;
+        background: linear-gradient(100deg, transparent, rgba(255,255,255,.30), transparent);
+        transform: rotate(16deg);
+        animation: sheen 2.8s ease-in-out infinite;
+      }
+      @keyframes sheen {
+        0%   { left: -120%; }
+        55%  { left: 150%; }
+        100% { left: 150%; }
+      }
+
+      /* --- wordmark + flowing underline --- */
+      .word {
+        font-size: 27px;
+        font-weight: 600;
+        letter-spacing: .16em;
+        text-indent: .16em;
+        background: linear-gradient(92deg, #ffffff 0%, #a9c2ff 42%, #6ee7ff 62%, #ffffff 100%);
+        background-size: 260% 100%;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        animation: flow 3.6s linear infinite;
+      }
+      @keyframes flow {
+        0%   { background-position: 130% 0; }
+        100% { background-position: -130% 0; }
+      }
+
+      .rule {
+        position: relative;
+        width: 156px; height: 2px;
+        border-radius: 2px;
+        background: rgba(255,255,255,.07);
+        overflow: hidden;
+      }
+      .rule::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        width: 42%;
+        border-radius: 2px;
+        background: linear-gradient(90deg, transparent, var(--accent), var(--accent2), transparent);
+        animation: sweep 1.55s cubic-bezier(.65,.05,.36,1) infinite;
+      }
+      @keyframes sweep {
+        0%   { transform: translateX(-105%); }
+        100% { transform: translateX(345%); }
+      }
+
+      .status {
+        font-size: 12.5px;
+        letter-spacing: .055em;
+        color: var(--dim);
+        min-height: 1.2em;
+        transition: color 200ms ease;
+      }
+      .status.warn { color: #fbbf24; }
+      .status.err  { color: #f87171; }
+
+      /* elapsed seconds, so a slow start never looks frozen */
+      .tick { font-variant-numeric: tabular-nums; opacity: .5; }
+
+      .dots::after {
+        content: "";
+        animation: dots 1.4s steps(4, end) infinite;
+      }
+      @keyframes dots {
+        0%   { content: ""; }
+        25%  { content: "."; }
+        50%  { content: ".."; }
+        75%  { content: "..."; }
+        100% { content: ""; }
+      }
+
+      .brand {
+        position: fixed;
+        left: 0; right: 0; bottom: 22px;
+        text-align: center;
+        font-size: 11px;
+        letter-spacing: .12em;
+        color: rgba(107,116,136,.55);
+      }
+
+      /* failure card, revealed only if the backend never announces itself */
+      .fail {
+        max-width: 520px;
+        margin-top: 4px;
+        padding: 18px 20px;
+        border-radius: 14px;
+        background: rgba(248,113,113,.055);
+        border: 1px solid rgba(248,113,113,.24);
+        color: #fecaca;
+        font-size: 12.5px;
+        line-height: 1.65;
+        text-align: left;
+        white-space: pre-wrap;
+        word-break: break-word;
+        display: none;
+      }
+      .fail.show { display: block; }
+      .fail b { color: #fca5a5; }
+      .fail code {
+        font-family: "Cascadia Mono", Consolas, monospace;
+        font-size: 11.5px;
+        color: #e5e7eb;
+        background: rgba(255,255,255,.06);
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .glow, .pulse, .orbit, .mark::after, .word, .rule::after, .dots::after {
+          animation: none !important;
+        }
+        .rule::after { width: 100%; opacity: .6; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div class="glow a"></div>
+      <div class="glow b"></div>
+      <div class="grid"></div>
+
+      <div class="center">
+        <div class="mark-wrap">
+          <div class="pulse"></div>
+          <div class="pulse"></div>
+          <div class="pulse"></div>
+          <div class="orbit"><div class="comet"></div></div>
+          <div class="mark">
+            <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+              <defs>
+                <linearGradient id="g" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+                  <stop stop-color="#7dd3fc" />
+                  <stop offset=".5" stop-color="#5b8cff" />
+                  <stop offset="1" stop-color="#8b5cf6" />
+                </linearGradient>
+              </defs>
+              <path d="M11 7.5 9 24.5" stroke="url(#g)" stroke-width="2.4" stroke-linecap="round" />
+              <path d="M19.5 7.5c4.6 0 7.2 2.4 7.2 6.1 0 3.9-2.9 6.4-7.6 6.4h-3" stroke="url(#g)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </div>
+        </div>
+
+        <div class="word">DSHELL</div>
+        <div class="rule"></div>
+        <div class="status" id="status">正在启动 DeepSeek Harness<span class="dots"></span> <span class="tick" id="tick"></span></div>
+        <div class="fail" id="fail"></div>
+      </div>
+    </div>
+
+    <div class="brand">DEEPSEEK HARNESS · DESKTOP SHELL</div>
+
+    <script>
+      // The Rust side drives this page through window.eval() with base64 payloads:
+      //   __dshell.statusB64(b64)  -> replace the status line (plain text)
+      //   __dshell.failB64(b64)    -> show the failure card (authored HTML)
+      //   __dshell.leave()         -> fade the splash out (called right before navigate)
+      //
+      // Base64 is used because the text crosses a JS string literal and then
+      // innerHTML; encoding it means no amount of quotes or angle brackets in a
+      // dsh error message can break out of either context.
+      (function () {
+        const stage = document.getElementById("stage");
+        const statusEl = document.getElementById("status");
+        const tickEl = document.getElementById("tick");
+        const failEl = document.getElementById("fail");
+        const started = Date.now();
+        let done = false;
+
+        const timer = setInterval(() => {
+          if (done) return;
+          const s = Math.floor((Date.now() - started) / 1000);
+          tickEl.textContent = s >= 2 ? s + "s" : "";
+        }, 400);
+
+        // Decode base64 -> UTF-8 string, correctly handling non-ASCII (Chinese).
+        function decode(b64) {
+          const bin = atob(b64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          return new TextDecoder("utf-8").decode(bytes);
+        }
+
+        function escapeHtml(s) {
+          return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+
+        window.__dshell = {
+          statusB64(payload) {
+            const text = decode(payload);
+            statusEl.className = "status";
+            statusEl.innerHTML =
+              escapeHtml(text) + '<span class="dots"></span> <span class="tick"></span>';
+            const s = Math.floor((Date.now() - started) / 1000);
+            statusEl.querySelector(".tick").textContent = s >= 2 ? s + "s" : "";
+          },
+          leave() {
+            done = true;
+            clearInterval(timer);
+            stage.classList.add("leaving");
+          },
+          failB64(payload) {
+            done = true;
+            clearInterval(timer);
+            statusEl.className = "status err";
+            statusEl.textContent = "启动失败";
+            failEl.className = "fail show";
+            // Authored in main.rs, not user input: render as markup, but turn
+            // newlines into breaks so the bullet list keeps its shape.
+            failEl.innerHTML = decode(payload).replace(/\n/g, "<br>");
+          }
+        };
+      })();
+    </script>
+  </body>
+</html>

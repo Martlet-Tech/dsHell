@@ -8,7 +8,11 @@ description = "Minimal desktop container for the DeepSeek Harness Web GUI"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon: 托盘支持。**不是 tauri 的默认 feature**，不加则 TrayIconBuilder 不存在。
+# common-controls-v6: Windows 下让原生对话框支持自定义按钮文字；缺少它时 rfd 退回
+#   MessageBoxW，自定义文字被静默丢弃。tauri 的 default 已含它，这里显式写出，
+#   防止将来有人关掉 default-features 时静默失效。
+tauri = { version = "2", features = ["tray-icon", "common-controls-v6"] }
 # 启动页需要把「用户选择」送回 Rust（指定安装位置 / 一键安装 / 取消 / 退出）
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }

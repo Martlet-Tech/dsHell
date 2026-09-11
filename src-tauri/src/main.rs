@@ -12,10 +12,17 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod close_dialog;
 mod config;
 mod doctor;
 mod installer;
+mod lifecycle;
 mod proc;
+mod tray;
+mod ui_text;
+
+/// 主窗口 label —— 全项目唯一来源，避免 "main" 字符串散落各处。
+pub const MAIN_WINDOW: &str = "main";
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
@@ -526,7 +533,7 @@ fn main() {
         .setup(move |app| {
             // 先把启动页弹出来：它是本地页面，瞬时绘制、不会 401，
             // 体检期间屏幕上一直是它（而不是空白）。
-            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let window = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
                 .title("DShell — DeepSeek Harness")
                 .inner_size(1280.0, 860.0)
                 .min_inner_size(760.0, 560.0)
@@ -548,6 +555,12 @@ fn main() {
             log("splash window built");
             app.manage(AppState::new(hold));
 
+            // 托盘：图标复用 exe 图标，左键恢复、右键「完全退出」
+            if let Err(e) = tray::init(app) {
+                // 托盘建不起来不该拦住主流程，记日志继续
+                log(&format!("tray: failed to init: {e}"));
+            }
+
             let handle = app.handle().clone();
             let w = window.clone();
             std::thread::spawn(move || {
@@ -566,6 +579,16 @@ fn main() {
             });
 
             Ok(())
+        })
+        // 拦截主窗口的 ×：不直接关，改为弹窗让用户选「完全退出 / 关到托盘 / 取消」。
+        //
+        // 前提：本轮只有主窗口一个窗口。将来做设置窗口时，必须在此按 `window.label()`
+        // 过滤，否则设置窗口的 × 也会弹出这个框。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                close_dialog::ask_close_choice(window.app_handle());
+            }
         })
         .build(tauri::generate_context!())
         .expect("failed to build the Tauri application")

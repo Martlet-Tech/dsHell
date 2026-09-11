@@ -6,6 +6,8 @@
 
 > 可用，但尚未完成。详见 [Roadmap](docs/roadmap.md)。
 
+![DShell 把 DeepSeek Harness 装进桌面窗口](docs/screenshots/main.png)
+
 ## 为什么需要它
 
 直接开 `http://127.0.0.1:3080/` 会 **401**。DSH 要求先带 `?token=<每进程随机>` 访问一次换取 cookie，而 WebView 有自己的 cookie 罐，冷启动开裸地址必然被拒。

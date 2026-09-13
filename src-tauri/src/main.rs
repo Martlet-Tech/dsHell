@@ -17,6 +17,7 @@ mod config;
 mod doctor;
 mod installer;
 mod lifecycle;
+mod picker;
 mod proc;
 mod tray;
 mod ui_text;
@@ -200,6 +201,7 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
     let pid = child.id();
     app.state::<AppState>().dsh_pid.store(pid, Ordering::SeqCst);
     log(&format!("spawned dsh web (pid {pid})"));
+
     let _ = app.emit(
         "doctor://step",
         doctor::launch_step(StepState::Checking, format!("已启动 dsh web（pid {pid}），等待地址")),
@@ -257,6 +259,11 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
 
 /// 起 `dsh web`：隐藏窗口、stdout/stderr 都接管、PATH 里前置用户指定的目录
 /// （否则"指定了 node 路径"这件事对 dsh 不起作用）。
+///
+/// 另外注入 `DSHELL_PICKER_PORT`：dsh 里的 `dshell-directory-picker` 插件靠它
+/// 找到 DShell 的原生对话框服务。**没有这个变量时插件不注册**，所以用户自己在
+/// 终端跑 `dsh web` 时内置 picker 照常工作——环境变量同时承担了"是否在 DShell
+/// 里"和"服务在哪个端口"两个信息，不需要额外的开关。
 fn spawn_dsh(cfg: &Config) -> std::io::Result<Child> {
     let mut cmd = Command::new("cmd");
     cmd.args(["/c", "dsh", "web", "--port", "0", "--no-open"])
@@ -264,6 +271,15 @@ fn spawn_dsh(cfg: &Config) -> std::io::Result<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let port = picker::port();
+    if port != 0 {
+        cmd.env("DSHELL_PICKER_PORT", port.to_string());
+        if let Some(token) = picker::auth_token() {
+            cmd.env("DSHELL_PICKER_TOKEN", token);
+        }
+    }
+    // 后端一律隐藏控制台：DShell 是 GUI 应用，弹黑框是缺陷。
+    // （立项 05 的 V1 实验曾用环境变量放开它来验证"前台权"假设，已被 §3 否证。）
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -531,6 +547,20 @@ fn main() {
             app_quit
         ])
         .setup(move |app| {
+            // 立项 04 · R19：先起「原生目录选择框」服务，再建窗口。
+            //
+            // 这是 DSH Desktop 套路的 Tauri 版：**壳层自己进程内**弹原生对话框，
+            // 而不是让 dsh 的 `-native` 后端去起一个独立子进程、弹一个**无 owner**
+            // 的 IFileOpenDialog。有主的模态框不会让主窗口失焦 → WebView2 不挂起
+            // → 不需要用户补点。
+            //
+            // 端口由内核分配，dsh 插件包通过配置文件读到它（见 picker.rs 的
+            // 端点设计说明）。
+            match picker::start(app.handle().clone()) {
+                Some(p) => log(&format!("picker: bridge listening on 127.0.0.1:{p}")),
+                None => log("picker: bridge unavailable - the workspace picker will fall back"),
+            }
+
             // 先把启动页弹出来：它是本地页面，瞬时绘制、不会 401，
             // 体检期间屏幕上一直是它（而不是空白）。
             let window = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
@@ -538,6 +568,32 @@ fn main() {
                 .inner_size(1280.0, 860.0)
                 .min_inner_size(760.0, 560.0)
                 .center()
+                // 立项 05 · R6 修复：阻止 WebView2 冻结页面。
+                //
+                // 机制（已由 R6 探针实测证实，见 docs/plan/05 §3.5）：
+                // 点「添加工作区」会弹原生 IFileOpenDialog，它抢走前台焦点后，
+                // WebView2 把本窗口判定为「被遮挡的后台窗口」，进而**冻结渲染进程**
+                // （Page Lifecycle 的 frozen 态）：事件分发与定时器全部停摆。
+                // 对话框关闭后没有任何东西触发 resume，页面就一直是僵尸态——
+                // hover 不变色、tooltip 卡住、工作区加了也不显示，
+                // 直到用户产生**任意一次输入**把它唤醒。
+                //
+                // 为什么之前的两个开关不够：那两个治的是「节流」（降频），
+                // 而这里是「冻结」（完全停止），且源头是**遮挡判定本身**。
+                // `CalculateNativeWinOcclusion` 正是 Chromium 计算窗口遮挡的特性，
+                // 关掉它，窗口就不会被判定为 occluded，冻结的触发条件随之消失。
+                //
+                // 注意：**必须原样保留 wry 的默认三个特性**。wry 用 `unwrap_or_else`
+                // （wry-0.55.1/src/webview2/mod.rs:294），一旦调用本方法，
+                // 它的默认值会被整体替换而非追加；漏掉会让 mini menu /
+                // SmartScreen 回来。
+                .additional_browser_args(concat!(
+                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,",
+                    "CalculateNativeWinOcclusion ",
+                    "--disable-backgrounding-occluded-windows ",
+                    "--disable-renderer-backgrounding ",
+                    "--disable-background-timer-throttling"
+                ))
                 // 只放行两个 origin：本地启动页和 loopback 上的 dsh。
                 // 其余一律交给系统浏览器，否则点个引用链接就把壳顶掉且回不来。
                 .on_navigation(|url| {
@@ -577,7 +633,6 @@ fn main() {
                 log("doctor: page did not ask within 2.5s - running anyway (fallback)");
                 run_doctor(&handle, &w, !hold);
             });
-
             Ok(())
         })
         // 拦截主窗口的 ×：不直接关，改为弹窗让用户选「完全退出 / 关到托盘 / 取消」。

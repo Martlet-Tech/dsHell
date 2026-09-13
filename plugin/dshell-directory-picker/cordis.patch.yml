@@ -1,0 +1,43 @@
+# dshell-directory-picker 的 bundle patch。
+#
+# ## 这一层的目标
+#
+# 让 dsh 用 **DShell 的原生对话框**去选工作区目录，而不是它自己那个会在独立
+# 子进程里弹**无 owner** 窗口的 `-native` 后端（后者让主窗口失焦 → WebView2
+# 挂起渲染进程 → 用户必须补点一下才看到新工作区）。
+#
+# ## 为什么不直接禁用 dsh 的 `directory-picker` 行（这是踩过的坑）
+#
+# 最初写的是「禁用 `directory-picker` 行 + 插入本插件」。那是错的，而且错得
+# 很实际：本插件在没有 `DSHELL_PICKER_PORT` 环境变量时**故意不注册**（为了不
+# 弄坏用户在终端直接跑的 `dsh web`）。于是用**旧版 DShell**（不设那个变量）时，
+# dsh 的行被禁用了、本插件又不注册 ⇒ **一个 picker 后端都没有** ⇒
+# 界面上「添加工作区」的按钮直接消失。
+#
+# 这个组合的失败方式比它要修的问题严重得多。所以改成**叠加式**：
+#
+#   * `directory-picker` 行**原样保留** —— dsh 的默认后端始终可用，按钮永远在。
+#   * 本插件在它**之后**插入（本包的 patch 层排在 `dsh-web-app` 之后，
+#     所以这里的 `data.push` 天然在后面）。
+#
+# ## 两个后端同时存在，cordis 不会冲突吗
+#
+# 不会，因为本插件**不注册任何服务**。`directoryPicker` 是单例服务
+# （官方文档："one implementation per context; loading a second throws"），
+# 再 provide 一次必然抛错——所以本插件根本不走那条路。
+#
+# 它做的是：`inject: ['directoryPicker']` 等到 dsh 的服务就绪，然后**改写那个
+# 实例的 `capability()`**（消费方只读这一个方法），服务的所有权、生命周期、
+# 依赖关系全都没动。卸载时把原方法放回去。完整说明见 `lib/index.js`。
+#
+# 于是三种情形都正确：
+#
+#   | 情形 | 结果 |
+#   | --- | --- |
+#   | DShell 新版启动（有端口） | 本插件接管，用 DShell 的原生对话框 |
+#   | 旧版 DShell / 终端直接跑 `dsh web` | 本插件不动作，dsh 后端照常 |
+#   | 本包被禁用或加载失败 | dsh 后端照常（因为它的行没被动过） |
+
+- insert:
+    - id: directory-picker-dshell
+      name: dshell-directory-picker

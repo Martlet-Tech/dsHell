@@ -38,6 +38,37 @@ cargo build --release
 
 产物在 `src-tauri/target/release/dshell.exe`。
 
+或者用封装好的脚本（编译到独立的 `target-build\`，不碰可能被运行中的 DShell
+锁住的 `target\`；结束后停住展示结果，方便看错误）：
+
+```powershell
+.\scripts\build.ps1            # release
+.\scripts\build.ps1 -Dev       # debug，快很多，只验证能不能编过
+```
+
+## 让「添加工作区」即时刷新（必做）
+
+**光编出 exe 是不够的**——那个"选完目录要点一下鼠标才刷新"的问题，修法是把
+选目录的交互交给壳层，而这一步需要往 dsh 的 profile 里装一个插件：
+
+```powershell
+.\scripts\install-picker-plugin.ps1
+```
+
+装完**必须重启 DShell**（dsh 只在启动时读一次 profile）。想恢复原状：
+
+```powershell
+.\scripts\install-picker-plugin.ps1 -Uninstall
+```
+
+原理：dsh 在 Windows 上会用**独立子进程**弹一个**没有 owner** 的原生对话框，
+主窗口因此失焦，WebView2 随即挂起渲染进程（实测 11.7 秒），解冻后界面不提交
+更新。插件把选目录转交给壳层，由壳层用**带 owner** 的对话框弹出，主窗口不失焦，
+挂起的前提就消失了。详见 [docs/plan/04](docs/plan/04-workspace-add-no-refresh.md)。
+
+插件是纯自足的（不 import 任何东西），所以只要把本仓库所在路径交给安装脚本即可，
+不需要额外装依赖。
+
 ## 使用
 
 双击运行。启动页会先做一次环境体检，逐项汇报：
@@ -64,9 +95,13 @@ cargo build --release
 ## 文件
 
 ```
-src-tauri/src/main.rs        全部逻辑
+src-tauri/src/main.rs        启动、体检编排、handoff、托盘
+src-tauri/src/picker.rs      原生目录选择框服务（只监听回环 + 共享令牌）
 src-tauri/tauri.conf.json    Tauri 配置
 ui/index.html                启动页（深色流光动画，无外部依赖）
+plugin/dshell-directory-picker/  把 dsh 的选目录转交给壳层的 dsh 插件
+scripts/build.ps1            构建封装（产物在 target-build\）
+scripts/install-picker-plugin.ps1  装/卸上面那个插件
 ```
 
 刻意不使用 Tauri IPC——DSH UI 只跟自己的后端走 HTTP/WebSocket，壳就只是壳。

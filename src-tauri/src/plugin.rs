@@ -331,9 +331,15 @@ fn ensure_listed(manifest_path: &Path) -> Result<bool, String> {
 
 /// 卸掉插件（`scripts/install-picker-plugin.ps1 -Uninstall` 的 Rust 版）。
 ///
-/// 目前没有 UI 入口，保留它是为了给"以后做设置页/卸载"留一个和安装对称的出口，
-/// 也方便手工用它排障。**开发期的 junction 会被删掉**——这是调用方的责任，
-/// 所以这个函数不自动调用。
+/// **目前没有任何调用方**：安装是启动时自动的，卸载还没有 UI 入口。保留它是为了
+/// 给"以后的设置页/卸载"留一个与安装对称的出口，也方便手工排障时调用。
+///
+/// 与 `ensure_installed` 的不变量**相反**，这里会**主动删除**目标目录。所以：
+///
+/// * 开发期的 junction 会被一并删掉（`remove_dir_all` 对 junction 只摘链接、
+///   不跟进目标，源码本身安全，但链接没了）；
+/// * 因此**绝不能**在启动路径上顺手调用它——安装侧的"绝不覆盖已有安装"正是
+///   为了不破坏开发者的 junction。
 #[allow(dead_code)]
 pub fn uninstall() -> Result<(), String> {
     let target = install_target();

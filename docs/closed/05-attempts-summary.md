@@ -1719,6 +1719,56 @@ DShell 侧日志 `picker: bridge listening on 127.0.0.1:53415` 与插件侧
 
 ### 19.7 遗留
 
-- `install-picker-plugin.ps1` 装完**必须重启 DShell**（dsh 只在启动时读 profile）。
+- ~~`install-picker-plugin.ps1` 装完**必须重启 DShell**（dsh 只在启动时读 profile）。~~
+  → **已由 §19.8 取代**：插件改由 exe 启动时自动安装，用户不再需要手动跑脚本。
 - 尚未验证 Tauri `set_parent` 与"不挂起"之间的因果是否**只有** parent 起作用；
   但 DSH Desktop 用同一机制且无此问题，可作强旁证。
+
+### 19.8 收口后的追加改动：插件改为自动安装（2026-09-14）
+
+§19.6 的"用户实测通过"是在**手动跑过 `install-picker-plugin.ps1`** 的机器上得到的。
+收口时发现这留下一个和本立项要修的问题**同样隐蔽**的坑：
+
+**手动步骤漏做时不会报错、不会崩溃，只是静默退回"选完目录要补点一下"** ——
+也就是本立项要修的那个症状。等于"修好了，但只要用户漏一步就等于没修"。
+
+于是改为 **exe 启动体检第 ⑥ 项自己装**（`src-tauri/src/plugin.rs`）。
+
+#### 为什么不用官方 `dsh plugin` 命令
+
+dsh 确有此命令（`apps/cli/src/plugin.ts`），但它是个 **pnpm 转发器**：
+`spawnSync('pnpm', …)`，pnpm 不在 PATH 时直接返回 127。终端用户机器上通常
+没有 pnpm（dsh 自己才是全局装的那个包），为一个只读 patch 层插件要求装 pnpm
+是把部署成本转嫁给用户。**改为纯文件复制**——插件零依赖（`lib/index.js` 全文
+无 `import`/`require`），dsh 解析 bundle 时会查 `<profile>/node_modules/<name>`
+（`app-boot/src/profile.ts` 的 `resolveBundleDir`），复制 + 登记即可。
+
+#### 三条不变量
+
+| 不变量 | 为什么 |
+| --- | --- |
+| **复制而非 junction** | junction 记住的是开发机绝对路径，用户机器上不存在 → 链接悬空 → 又是静默降级 |
+| **不覆盖已有安装** | 开发机的 junction 或用户自装的版本优先级最高，只读不动 |
+| **失败降级放行** | 插件只影响"选完要不要补点一下"，不该拦住整个应用启动 |
+
+#### 实测（2026-09-14，本机）
+
+| 验证 | 结果 |
+| --- | --- |
+| 干净 profile（dsh 模板初始化）→ 自动装上 | ✅ 复制为真目录，`bundles` 追加在 `dsh-web-app` **之后** |
+| 真 dsh 解析该 profile | ✅ `dsh --profile web --dump-default-config` 含 `id: directory-picker-dshell` |
+| 幂等（二次启动） | ✅ manifest SHA256 不变，无 `.tmp` 残留 |
+| 已有安装不被覆盖 | ✅ 预置标记文件原样保留，仅登记 |
+| profile 不存在时 | ✅ 降级为黄字，不拦启动（`allOk=true`） |
+| 端到端耗时 | ✅ 2328 / 1775 / 2132 / **1303** ms（改善前 6430 / 7453 ms） |
+
+#### 顺带修掉的发布缺口
+
+`release.yml` 原本写着"只装一个 exe：DShell 是薄壳，没有依赖目录要跟着分发"。
+该假设被推翻——Tauri 在 `bundle.active: false` 时把 `bundle.resources` 导出到
+exe **同级**的 `plugin\` 目录，而非嵌进 exe。照原样发版，zip 里没有 `plugin\`，
+用户装完就是**静默降级**，正是本立项要消灭的失败方式。
+
+现在 release 打包 exe + `plugin\` 并排、缺件直接失败；`ci.yml` 增加门禁校验
+插件确实被导出、声明了 `dsh.bundle.patch`、且入口保持**零依赖**（一旦有人加
+`import`，纯复制的自动安装就会失效）。

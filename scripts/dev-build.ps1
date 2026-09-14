@@ -28,12 +28,17 @@
 
     所以本脚本**总是把插件一起放好**，不给你留"忘了拷"的机会。
 
+.PARAMETER Dev
+    编 debug 版（快得多，只验证能不能编过）。产物目录名带 `-dev` 后缀，
+    与同期的 release 构建区分开。
+
 .PARAMETER Clean
-    编译前删掉 target\ 全量重建（慢，排除增量缓存问题）。
+    编译前删掉 target\release\ 与 target\debug\ 全量重建（慢，排除增量缓存
+    问题）。**不删**时间戳构建目录——那是你要留着的历史产物。
 
 .PARAMETER Keep
     保留的最近构建个数，默认 5。更老的会自动清理（只删本脚本建的
-    `yyyyMMdd-HHmmss` 形态的目录，不碰 cargo 的 release\ / debug\）。
+    `yyyyMMdd-HHmmss[-dev]` 形态的目录，不碰 cargo 的 release\ / debug\）。
 
 .PARAMETER NoPause
     结束后不停留等按键（给自动化用）。
@@ -43,11 +48,16 @@
     产出 target\20260914-091530\{dshell.exe, plugin\}
 
 .EXAMPLE
+    .\dev-build.ps1 -Dev
+    debug 版，产物在 target\20260914-091530-dev\。
+
+.EXAMPLE
     .\dev-build.ps1 -Keep 10
     保留最近 10 次构建。
 #>
 [CmdletBinding()]
 param(
+    [switch]$Dev,
     [switch]$Clean,
     [int]$Keep = 5,
     [switch]$NoPause
@@ -59,8 +69,10 @@ $ErrorActionPreference = 'Stop'
 $REPO_ROOT = Split-Path $PSScriptRoot -Parent
 $TAURI_DIR = Join-Path $REPO_ROOT 'src-tauri'
 $TARGET    = Join-Path $TAURI_DIR 'target'
+$PROFILE   = if ($Dev) { 'debug' } else { 'release' }
 $STAMP     = Get-Date -Format 'yyyyMMdd-HHmmss'
-$OUT_DIR   = Join-Path $TARGET $STAMP
+# dev 版加后缀，免得和同一次 release 构建撞名（同一秒内先编 debug 再编 release）
+$OUT_DIR   = Join-Path $TARGET $(if ($Dev) { "$STAMP-dev" } else { $STAMP })
 
 function Write-Section($t) {
     Write-Host ''
@@ -139,15 +151,18 @@ if ($Clean) {
 }
 
 # ── 编译 ────────────────────────────────────────────────────────────
-Write-Section '编译（release）'
+Write-Section "编译（$PROFILE）"
 Write-Host '  cargo 输出如下（出错时下面会汇总真正那几条错误）' -ForegroundColor DarkGray
 Write-Host ''
 
-# 编到 target\release（cargo 默认），产物之后再拷进时间戳目录。
+# 编到 target\<profile>\（cargo 默认落点），产物之后再拷进时间戳目录。
 # 这样 cargo 的增量缓存跨构建复用，不必每次全量编译。
 $started = Get-Date
 $rawLog  = Join-Path $env:TEMP ("dshell-devbuild-{0}.log" -f $STAMP)
 $exitCode = 1
+
+$cargoArgs = @('build')
+if (-not $Dev) { $cargoArgs += '--release' }
 
 Push-Location $TAURI_DIR
 try {
@@ -158,7 +173,7 @@ try {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & cargo build --release 2>&1 |
+        & cargo @cargoArgs 2>&1 |
             ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } } |
             Tee-Object -FilePath $rawLog
         $exitCode = $LASTEXITCODE
@@ -176,7 +191,7 @@ $elapsed = [Math]::Round(((Get-Date) - $started).TotalSeconds, 1)
 # ── 结果 ────────────────────────────────────────────────────────────
 Write-Section '结果'
 
-$BIN = Join-Path $TARGET 'release\dshell.exe'
+$BIN = Join-Path $TARGET "$PROFILE\dshell.exe"
 
 if ($exitCode -ne 0 -or -not (Test-Path $BIN)) {
     Write-Host ''
@@ -207,16 +222,16 @@ if ($exitCode -ne 0 -or -not (Test-Path $BIN)) {
 }
 
 # ── 组装产物目录 ────────────────────────────────────────────────────
-Write-Section "组装 target\$STAMP"
+Write-Section "组装 $(Split-Path $OUT_DIR -Leaf)"
 
 New-Item -ItemType Directory -Force -Path $OUT_DIR | Out-Null
 Copy-Item $BIN (Join-Path $OUT_DIR 'dshell.exe') -Force
 Write-Ok 'dshell.exe'
 
-# Tauri 把 resource 导出到 target\release\plugin\ —— 原样搬过去。
+# Tauri 把 resource 导出到 target\<profile>\plugin\ —— 原样搬过去。
 # 这一步是**必须**的：exe 靠它旁边的 plugin\ 找插件。缺了不会崩，
 # 但选目录的即时刷新会静默失效，所以这里宁可硬失败。
-$pluginExported = Join-Path $TARGET 'release\plugin'
+$pluginExported = Join-Path $TARGET "$PROFILE\plugin"
 if (-not (Test-Path $pluginExported)) {
     Write-Bad "cargo 没有导出 plugin\ —— tauri.conf.json 的 bundle.resources 丢了吗？"
     Write-Bad "产物不完整，已放弃。"
@@ -234,8 +249,9 @@ if (-not (Test-Path $entry)) {
 }
 
 # ── 清理旧构建 ──────────────────────────────────────────────────────
+# 只认本脚本建的形态（带可选 -dev 后缀），绝不误删 cargo 的 release\ / debug\。
 $olds = @(Get-ChildItem $TARGET -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^\d{8}-\d{6}$' } |
+    Where-Object { $_.Name -match '^\d{8}-\d{6}(-dev)?$' } |
     Sort-Object Name -Descending |
     Select-Object -Skip $Keep)
 if ($olds.Count -gt 0) {

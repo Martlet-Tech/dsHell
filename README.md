@@ -53,6 +53,8 @@ src-tauri\target\20260914-091044\
 `bundle.resources` 导出到 exe **同级**目录，而不是嵌进 exe。脚本总是把它一起
 放好，并在缺失时直接失败，不产出残包。
 
+加 `-Dev` 编 debug 版（快得多，只验证能不能编过），产物目录名带 `-dev` 后缀。
+
 ### 直接 cargo
 
 ```powershell
@@ -69,8 +71,9 @@ cargo build --release
 `DShell-<tag>-windows-x86_64.zip`，内含 exe + `plugin\`。日常 push 由
 [ci.yml](.github/workflows/ci.yml) 做编译检查，并验证插件确实被一起导出。
 
-> 旧的 `scripts\build.ps1`（编到 `target-build\`）已被 `dev-build.ps1` 取代，
-> 保留仅为过渡。
+> 发布物是**两个东西**（exe + `plugin\` 目录），不是单文件。原因是
+> `bundle.active: false` 时 Tauri 不把 resource 嵌进 exe。冒烟测试与 release
+> 流程都已强制两者同行，但**别只把 exe 拷走**。
 
 ## 让「添加工作区」即时刷新（exe 自动完成）
 
@@ -103,7 +106,7 @@ npm / pnpm**，用户双击即用。
 原理：dsh 在 Windows 上会用**独立子进程**弹一个**没有 owner** 的原生对话框，
 主窗口因此失焦，WebView2 随即挂起渲染进程（实测 11.7 秒），解冻后界面不提交
 更新。插件把选目录转交给壳层，由壳层用**带 owner** 的对话框弹出，主窗口不失焦，
-挂起的前提就消失了。详见 [docs/plan/04](docs/plan/04-workspace-add-no-refresh.md)。
+挂起的前提就消失了。详见 [docs/closed/04](docs/closed/04-workspace-add-no-refresh.md)。
 
 ## 使用
 
@@ -139,7 +142,6 @@ ui/index.html                启动页（深色流光动画，无外部依赖）
 plugin/dshell-directory-picker/  把 dsh 的选目录转交给壳层的 dsh 插件（随 exe 发布）
 scripts/dev-build.ps1        开发构建（产物在 target\<时间戳>\，exe + plugin\）
 scripts/install-picker-plugin.ps1  手动装/卸上面那个插件（诊断与开发期兜底）
-scripts/build.ps1            旧的构建封装（产物在 target-build\，已被 dev-build.ps1 取代）
 .github/workflows/ci.yml     编译检查 + 校验插件随 exe 导出
 .github/workflows/release.yml  tag 触发，产出含 exe + plugin\ 的 zip
 ```

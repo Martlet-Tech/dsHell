@@ -571,7 +571,7 @@ fn main() {
                 .center()
                 // 立项 05 · R6 修复：阻止 WebView2 冻结页面。
                 //
-                // 机制（已由 R6 探针实测证实，见 docs/plan/05 §3.5）：
+                // 机制（已由 R6 探针实测证实，见 docs/closed/05 §3.5）：
                 // 点「添加工作区」会弹原生 IFileOpenDialog，它抢走前台焦点后，
                 // WebView2 把本窗口判定为「被遮挡的后台窗口」，进而**冻结渲染进程**
                 // （Page Lifecycle 的 frozen 态）：事件分发与定时器全部停摆。

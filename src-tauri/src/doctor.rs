@@ -1,8 +1,12 @@
-//! 启动前环境体检：五项探测，一项一条结论。
+//! 启动前环境体检：六项探测，一项一条结论。
 //!
 //! 设计约束（见 docs/closed/01-env-doctor.md 的 D4）：
-//! **全部跑完再汇报，缺失只是状态、不是异常**。只有第 ⑥ 步「启动 dsh web」
+//! **全部跑完再汇报，缺失只是状态、不是异常**。只有最后的「启动 dsh web」
 //! 才真正需要前置条件满足。
+//!
+//! 第 ⑥ 项 `picker` 与其余五项性质不同：它**由 DShell 自己保证**（把自带的
+//! 插件装进 dsh 的 profile），而不是探测用户机器上有什么。放在最后是因为它
+//! 依赖 ⑤ 的 profile 目录。失败也不拦启动——详见 `plugin` 模块的说明。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,7 +26,7 @@ const MIN_NODE: (u32, u32, u32) = (18, 0, 0);
 const WEBVIEW2_GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
 
 /// 固定顺序（页面的时间线也按这个顺序排）。
-pub const IDS: [&str; 5] = ["webview", "node", "npm", "dsh", "profile"];
+pub const IDS: [&str; 6] = ["webview", "node", "npm", "dsh", "profile", "picker"];
 
 pub const WEBVIEW_URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
 pub const NODE_URL: &str = "https://nodejs.org/en/download";
@@ -69,6 +73,7 @@ pub fn label_of(id: &str) -> &'static str {
         "npm" => "npm 包管理器",
         "dsh" => "dsh 命令行（DeepSeek Harness）",
         "profile" => "dsh 配置目录可写",
+        "picker" => "原生目录选择器（自带插件）",
         "launch" => "启动 DeepSeek Harness",
         _ => "检查项",
     }
@@ -129,6 +134,7 @@ pub fn reprobe(app: &AppHandle, cfg: &Config, id: &str) -> Step {
         "npm" => probe_npm(cfg),
         "dsh" => probe_dsh(cfg),
         "profile" => probe_profile(),
+        "picker" => probe_picker(),
         other => mk(other, StepState::Warn, "未知检查项", None, None),
     };
     let _ = app.emit("doctor://step", &s);
@@ -159,6 +165,9 @@ pub fn blocking_ids(steps: &[Step]) -> Vec<String> {
         .filter(|s| {
             s.id != "launch"
                 && s.id != "profile"
+                // picker 是 DShell 自己装的增强项：它只影响"选完目录要不要补点
+                // 一下鼠标"，不该拦住整个应用。失败降级成黄字继续走。
+                && s.id != "picker"
                 && matches!(s.state, StepState::Missing | StepState::Failed)
         })
         .map(|s| s.id.clone())
@@ -445,6 +454,26 @@ fn probe_profile() -> Step {
             None,
             None,
         ),
+    }
+}
+
+/// ⑥ 自带插件（原生目录选择器）。
+///
+/// 这不是"探测"，而是"确保"——`plugin::ensure_installed` 会把随 exe 发布的
+/// 插件复制进 dsh 的 profile。幂等，所以每次启动跑一遍是安全的。
+///
+/// 三种结果映射到页面：
+///   * 已就绪 / 刚装上 → Ok（`Installed` 的措辞让用户看得出"这是本次做的"）
+///   * 跳过或失败     → Warn，**不拦启动**（见 `blocking_ids` 的排除）
+pub fn probe_picker() -> Step {
+    match crate::plugin::ensure_installed() {
+        crate::plugin::Status::Present { detail } => mk("picker", StepState::Ok, detail, None, None),
+        crate::plugin::Status::Installed { detail } => {
+            mk("picker", StepState::Ok, detail, None, None)
+        }
+        crate::plugin::Status::Degraded { detail } => {
+            mk("picker", StepState::Warn, detail, None, None)
+        }
     }
 }
 

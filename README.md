@@ -31,43 +31,79 @@ DShell.exe ──spawn──▶ dsh web --port 0
 
 需要 Rust 工具链、MSVC linker、WebView2 runtime（Win10 1803+ 通常自带）。
 
+### 开发构建（日常用这个）
+
+```powershell
+.\scripts\dev-build.ps1
+```
+
+产出**自包含**的时间戳目录，双击里面那个 exe 即可：
+
+```
+src-tauri\target\20260914-091044\
+    dshell.exe
+    plugin\dshell-directory-picker\     ← exe 启动时要读它
+```
+
+用 `yyyyMMdd-HHmmss` 另开目录是为了不打断你正在调试的实例：DShell 运行时会锁住
+`target\release\dshell.exe`，固定路径就必须先关掉旧实例才能编下一版。时间戳目录
+让新旧并存，编译永远能成功，也能开两个实例做对比。默认保留最近 5 次（`-Keep N`）。
+
+`plugin\` 必须和 exe 并排：Tauri 在 `bundle.active: false` 时把
+`bundle.resources` 导出到 exe **同级**目录，而不是嵌进 exe。脚本总是把它一起
+放好，并在缺失时直接失败，不产出残包。
+
+### 直接 cargo
+
 ```powershell
 cd src-tauri
 cargo build --release
 ```
 
-产物在 `src-tauri/target/release/dshell.exe`。
+产物在 `src-tauri/target/release/`，但**要自己确认那里的 `plugin\` 目录也在**，
+否则选目录的即时刷新会静默失效。
 
-或者用封装好的脚本（编译到独立的 `target-build\`，不碰可能被运行中的 DShell
-锁住的 `target\`；结束后停住展示结果，方便看错误）：
+### 发布
+
+推 `v*` tag 触发 [release.yml](.github/workflows/release.yml)，产出
+`DShell-<tag>-windows-x86_64.zip`，内含 exe + `plugin\`。日常 push 由
+[ci.yml](.github/workflows/ci.yml) 做编译检查，并验证插件确实被一起导出。
+
+> 旧的 `scripts\build.ps1`（编到 `target-build\`）已被 `dev-build.ps1` 取代，
+> 保留仅为过渡。
+
+## 让「添加工作区」即时刷新（exe 自动完成）
+
+那个"选完目录要点一下鼠标才刷新"的问题，修法是把选目录的交互交给壳层。这需要
+两半配合，而且**两半都在你双击的那个 exe 里了**：
+
+| 一半 | 住在哪 | 谁负责 |
+| --- | --- | --- |
+| 提供端口 `DSHELL_PICKER_PORT` | DShell 启动 `dsh web` 时注入 | exe（编译进去的） |
+| 消费端口（一个 dsh 插件） | dsh 的 profile：`~/.dsh/profiles/web` | exe 启动时**自动安装** |
+
+启动体检的第 ⑥ 项「原生目录选择器（自带插件）」做的就是第二件事：把随 exe
+发布的插件复制进 profile 并登记到 `dsh.profile.bundles`。插件零依赖，**不需要
+npm / pnpm**，用户双击即用。
+
+这一项失败（比如 profile 目录不可写）**不会拦住启动**，只会在体检里显示黄字——
+它只影响"选完目录要不要补点一下"，不该让整个应用起不来。profile 尚未创建时
+（dsh 从没跑过）会跳过安装，下次启动自动补上。
+
+诊断或手动兜底：
 
 ```powershell
-.\scripts\build.ps1            # release
-.\scripts\build.ps1 -Dev       # debug，快很多，只验证能不能编过
+.\scripts\install-picker-plugin.ps1            # 手动装（旧版 exe / 自动装失败时）
+.\scripts\install-picker-plugin.ps1 -Uninstall # 恢复原状
 ```
 
-## 让「添加工作区」即时刷新（必做）
-
-**光编出 exe 是不够的**——那个"选完目录要点一下鼠标才刷新"的问题，修法是把
-选目录的交互交给壳层，而这一步需要往 dsh 的 profile 里装一个插件：
-
-```powershell
-.\scripts\install-picker-plugin.ps1
-```
-
-装完**必须重启 DShell**（dsh 只在启动时读一次 profile）。想恢复原状：
-
-```powershell
-.\scripts\install-picker-plugin.ps1 -Uninstall
-```
+> 自动安装**只复制、绝不覆盖已有安装**。开发期如果想用 junction 链到源码
+> （改完插件不用重装），跑一次上面的脚本即可——自动安装会认出它并保留。
 
 原理：dsh 在 Windows 上会用**独立子进程**弹一个**没有 owner** 的原生对话框，
 主窗口因此失焦，WebView2 随即挂起渲染进程（实测 11.7 秒），解冻后界面不提交
 更新。插件把选目录转交给壳层，由壳层用**带 owner** 的对话框弹出，主窗口不失焦，
 挂起的前提就消失了。详见 [docs/plan/04](docs/plan/04-workspace-add-no-refresh.md)。
-
-插件是纯自足的（不 import 任何东西），所以只要把本仓库所在路径交给安装脚本即可，
-不需要额外装依赖。
 
 ## 使用
 
@@ -97,11 +133,15 @@ cargo build --release
 ```
 src-tauri/src/main.rs        启动、体检编排、handoff、托盘
 src-tauri/src/picker.rs      原生目录选择框服务（只监听回环 + 共享令牌）
+src-tauri/src/plugin.rs      自带插件的自动安装（复制进 dsh profile + 登记 bundle）
 src-tauri/tauri.conf.json    Tauri 配置
 ui/index.html                启动页（深色流光动画，无外部依赖）
-plugin/dshell-directory-picker/  把 dsh 的选目录转交给壳层的 dsh 插件
-scripts/build.ps1            构建封装（产物在 target-build\）
-scripts/install-picker-plugin.ps1  装/卸上面那个插件
+plugin/dshell-directory-picker/  把 dsh 的选目录转交给壳层的 dsh 插件（随 exe 发布）
+scripts/dev-build.ps1        开发构建（产物在 target\<时间戳>\，exe + plugin\）
+scripts/install-picker-plugin.ps1  手动装/卸上面那个插件（诊断与开发期兜底）
+scripts/build.ps1            旧的构建封装（产物在 target-build\，已被 dev-build.ps1 取代）
+.github/workflows/ci.yml     编译检查 + 校验插件随 exe 导出
+.github/workflows/release.yml  tag 触发，产出含 exe + plugin\ 的 zip
 ```
 
 刻意不使用 Tauri IPC——DSH UI 只跟自己的后端走 HTTP/WebSocket，壳就只是壳。

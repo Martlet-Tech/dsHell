@@ -382,6 +382,7 @@
           npm: "npm 包管理器",
           dsh: "dsh 命令行（DeepSeek Harness）",
           profile: "dsh 配置目录可写",
+          picker: "原生目录选择器（自带插件）",
           launch: "启动 DeepSeek Harness",
         };
         const PICKABLE = ["node", "npm", "dsh"];
@@ -622,7 +623,7 @@
           T.core.invoke("doctor_run").catch((e) => toast(String(e)));
         }
 
-        ["webview", "node", "npm", "dsh", "profile"].forEach((id) =>
+        ["webview", "node", "npm", "dsh", "profile", "picker"].forEach((id) =>
           renderStep({ id: id, state: "pending", detail: "等待检查" })
         );
 

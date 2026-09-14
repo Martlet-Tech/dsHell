@@ -63,8 +63,29 @@ jobs:
         run: |
           $exe = "src-tauri/target/release/$env:EXE_NAME"
           if (-not (Test-Path $exe)) { throw "找不到产物：$exe" }
-          # 只装一个 exe：DShell 是薄壳，没有依赖目录要跟着分发
-          Compress-Archive -Path $exe -DestinationPath $env:ZIP_NAME -CompressionLevel Optimal
+
+          # 必须连 plugin\ 一起发：Tauri 在 bundle.active=false 时把
+          # bundle.resources 导出到 exe **同级**的 plugin\ 目录，而不是嵌进 exe。
+          # exe 启动体检的第 ⑥ 项靠它把 dsh 插件装进 profile —— 少了它不会崩，
+          # 但"选完目录立即刷新"会静默退回旧行为（要点一下鼠标），
+          # 用户和我们都很难察觉。所以这里缺了直接失败，不发残包。
+          $plugin = "src-tauri/target/release/plugin"
+          $entry  = Join-Path $plugin "dshell-directory-picker/lib/index.js"
+          if (-not (Test-Path $entry)) {
+            throw "缺少导出的插件：$entry。检查 src-tauri/tauri.conf.json 的 bundle.resources。"
+          }
+
+          # 组装一个自包含的发布目录再压缩，保证解压出来 exe 和 plugin\ 是并排的
+          $stage = Join-Path $env:RUNNER_TEMP "dshell-stage"
+          Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $exe $stage
+          Copy-Item $plugin (Join-Path $stage "plugin") -Recurse
+
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $env:ZIP_NAME -CompressionLevel Optimal
+
+          Write-Host "包内容："
+          Get-ChildItem $stage -Recurse | Select-Object -ExpandProperty FullName
           Get-Item $env:ZIP_NAME | Select-Object Name, Length
 
       - name: 建 Release 并上传 zip

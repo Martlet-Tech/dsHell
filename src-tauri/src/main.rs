@@ -18,6 +18,7 @@ mod doctor;
 mod installer;
 mod lifecycle;
 mod picker;
+mod plugin;
 mod proc;
 mod tray;
 mod ui_text;

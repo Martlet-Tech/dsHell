@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     编译 DShell 的 exe，结果留在窗口里让你看完再关。
 
@@ -172,9 +172,25 @@ $rawLog  = Join-Path $env:TEMP ("dshell-build-{0}.log" -f (Get-Date -Format 'HHm
 $exitCode = 1
 Push-Location $TAURI_DIR
 try {
-    # Tee 到文件：窗口里滚动太快也能事后查；$LASTEXITCODE 才是权威判据。
-    & cargo @cargoArgs 2>&1 | Tee-Object -FilePath $rawLog
-    $exitCode = $LASTEXITCODE
+    # 这里有两个坑，别顺手改回去：
+    #  1) cargo 把进度和报错统统写到 stderr。一旦用 `2>&1` 合并，在
+    #     $ErrorActionPreference='Stop' 下 PowerShell 会把 stderr 行当成**终止性错误**
+    #     （NativeCommandError），于是第一行 "Compiling ..." 就把整个构建打断
+    #     （实测：7 秒即退出，一个字都没编出来）。所以这里临时降到 'Continue'。
+    #  2) 降级后 stderr 变成 ErrorRecord 对象，直接喂给 Tee-Object 会被渲染成带
+    #     "At line ... / CategoryInfo" 的红色报错块：既刷屏，又让下面挑 error 行的
+    #     正则（^\s*error）失效。所以进 Tee 之前先统一转成普通字符串。
+    # 退出码始终以 $LASTEXITCODE 为准。
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & cargo @cargoArgs 2>&1 |
+            ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } } |
+            Tee-Object -FilePath $rawLog
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
 } catch {
     Write-Bad "调用 cargo 失败：$($_.Exception.Message)"
     $exitCode = 1

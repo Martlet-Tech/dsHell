@@ -23,6 +23,12 @@ pub fn tray_tooltip() -> &'static str {
     }
 }
 
+pub fn menu_open_in_browser() -> &'static str {
+    match current() {
+        Lang::ZhCn => "在浏览器中打开",
+    }
+}
+
 pub fn menu_quit() -> &'static str {
     match current() {
         Lang::ZhCn => "完全退出",

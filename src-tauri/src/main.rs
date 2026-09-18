@@ -60,6 +60,8 @@ pub struct AppState {
     doctor_requested: AtomicBool,
     /// DSHELL_SPLASH_HOLD：停在报告页不 handoff，方便截图/调动画
     hold: bool,
+    /// dsh 的入口地址（含 token）。handoff 成功后写入，托盘「在浏览器中打开」读它。
+    launch_url: Mutex<String>,
 }
 
 impl AppState {
@@ -71,7 +73,20 @@ impl AppState {
             handoff_started: AtomicBool::new(false),
             doctor_requested: AtomicBool::new(false),
             hold,
+            launch_url: Mutex::new(String::new()),
         }
+    }
+
+    pub fn set_launch_url(&self, url: &str) {
+        if let Ok(mut u) = self.launch_url.lock() {
+            *u = url.to_string();
+        }
+    }
+
+    /// 还没 handoff 成功时返回 None（启动页阶段）。
+    pub fn launch_url(&self) -> Option<String> {
+        let u = self.launch_url.lock().ok()?;
+        (!u.is_empty()).then(|| u.clone())
     }
 }
 
@@ -216,6 +231,7 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
                 log(&format!("launch url: {url}"));
                 match url.parse::<tauri::Url>() {
                     Ok(parsed) => {
+                        app.state::<AppState>().set_launch_url(parsed.as_str());
                         let _ = app.emit(
                             "doctor://step",
                             doctor::launch_step(StepState::Checking, "准备就绪，正在进入"),
@@ -663,6 +679,22 @@ fn main() {
                 }
             }
         });
+}
+
+/// 托盘「在浏览器中打开」：把 dsh 的入口地址丢给系统浏览器。
+///
+/// 地址里带的进程 token 在整个进程存活期间有效（dsh 只要 token 或 cookie 之一），
+/// 所以同一个地址可以反复打开，外部浏览器换来的是它自己的 cookie。
+/// 启动页阶段还没 handoff，地址为空 —— 记一行日志，不做静默失败。
+fn open_dsh_in_browser<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let Some(url) = app.state::<AppState>().launch_url() else {
+        log("tray: open in browser skipped (dsh 地址还没就绪)");
+        return;
+    };
+    match open_in_browser(&url) {
+        Ok(()) => log("tray: handed dsh url to system browser"),
+        Err(e) => log(&format!("tray: open in browser failed: {e}")),
+    }
 }
 
 /// 外链丢给系统浏览器（`cmd` 的 `start`，不引额外 crate）。

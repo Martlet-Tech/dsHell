@@ -13,6 +13,7 @@ use crate::{lifecycle, ui_text};
 
 /// 托盘菜单项 id（集中一处，避免字符串散落）
 const MENU_ID_QUIT: &str = "tray-quit";
+const MENU_ID_OPEN_BROWSER: &str = "tray-open-browser";
 /// 托盘图标 id
 const TRAY_ID: &str = "main-tray";
 
@@ -20,14 +21,23 @@ const TRAY_ID: &str = "main-tray";
 enum TrayAction {
     /// 左键单击 → 重新展开主界面
     RestoreWindow,
+    /// 菜单「在浏览器中打开」
+    OpenInBrowser,
     /// 菜单「完全退出」
     Quit,
 }
 
 /// 建托盘。在 `setup` 里调用一次。
 pub fn init<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
+    let open_browser_item = MenuItem::with_id(
+        app,
+        MENU_ID_OPEN_BROWSER,
+        ui_text::menu_open_in_browser(),
+        true,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, MENU_ID_QUIT, ui_text::menu_quit(), true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&quit_item])?;
+    let menu = Menu::with_items(app, &[&open_browser_item, &quit_item])?;
 
     // 复用 exe 图标：不新增任何资源文件。
     // 拿不到时（tauri.conf.json 的 bundle.icon 为空）托盘无图标，但仍要建出来，
@@ -38,8 +48,11 @@ pub fn init<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
         // 默认为 true；不关掉的话左键会弹菜单，而不是恢复窗口
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
-            if event.id() == MENU_ID_QUIT {
+            let id = event.id();
+            if id == MENU_ID_QUIT {
                 dispatch(app, TrayAction::Quit);
+            } else if id == MENU_ID_OPEN_BROWSER {
+                dispatch(app, TrayAction::OpenInBrowser);
             }
         })
         .on_tray_icon_event(|tray, event| {
@@ -64,10 +77,11 @@ pub fn init<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 唯一的动作出口：托盘不自己干副作用，统一交给 `lifecycle`。
+/// 唯一的动作出口：托盘不自己干副作用，一律交给 `lifecycle` 或壳层的 `open_dsh_in_browser`。
 fn dispatch<R: Runtime>(app: &AppHandle<R>, action: TrayAction) {
     match action {
         TrayAction::RestoreWindow => lifecycle::restore_main_window(app),
+        TrayAction::OpenInBrowser => crate::open_dsh_in_browser(app),
         TrayAction::Quit => lifecycle::quit(app),
     }
 }

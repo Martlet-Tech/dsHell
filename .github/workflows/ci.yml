@@ -31,3 +31,47 @@ jobs:
       - name: cargo check --release
         working-directory: src-tauri
         run: cargo check --release
+
+      # cargo check 不产出 resource，所以它**证明不了**发布包是完整的。
+      # 真正编一次 release，确认 tauri 把插件导出到了 exe 同级。
+      #
+      # 这一步拦的是最隐蔽的一类回归：tauri.conf.json 的 bundle.resources
+      # 被删掉/改错 → exe 照常编译、照常启动，只是启动体检第 ⑥ 项悄悄降级，
+      # 用户选完目录又要补点一下鼠标。没有这道门，这个缺陷会一路走到 release。
+      - name: 构建 release（验证插件被一起导出）
+        working-directory: src-tauri
+        run: cargo build --release
+
+      - name: 校验插件随 exe 一起导出
+        shell: pwsh
+        run: |
+          # exe 必须在
+          $exe = "src-tauri/target/release/dshell.exe"
+          if (-not (Test-Path $exe)) { throw "找不到 exe：$exe" }
+
+          # 插件必须导出到 exe 同级（bundle.active=false 时 tauri 的行为）
+          $dir   = "src-tauri/target/release/plugin/dshell-directory-picker"
+          $entry = "$dir/lib/index.js"
+          foreach ($f in @("$dir/package.json", "$dir/cordis.patch.yml", $entry)) {
+            if (-not (Test-Path $f)) {
+              throw "插件未被导出：$f 缺失。src-tauri/tauri.conf.json 的 bundle.resources 是否还在？"
+            }
+          }
+
+          # 插件包必须声明 dsh.bundle，否则 dsh 不会把它当 patch 层加载
+          $manifest = Get-Content "$dir/package.json" -Raw | ConvertFrom-Json
+          if (-not $manifest.dsh.bundle.patch) {
+            throw "$dir/package.json 没有声明 dsh.bundle.patch —— dsh 不会加载它"
+          }
+
+          # 入口必须**自足**：有 import/require 就意味着装进 profile 后还要
+          # 依赖解析（pnpm/npm 装依赖），而自动安装只做纯复制 → 会静默失败。
+          # 这是当初选"复制"路线的前提，一旦被破坏，自动安装就废了。
+          $src = Get-Content $entry -Raw
+          if ($src -match '(?m)^\s*(import\s|import\(|const\s.*require\(|let\s.*require\(|var\s.*require\()') {
+            throw "$entry 含 import/require —— 自动安装是纯复制，不会装依赖，插件必须保持零依赖"
+          }
+
+          Write-Host "插件已随 exe 导出，且自足（零依赖）："
+          Get-ChildItem (Split-Path $dir -Parent) -Recurse -File |
+            Select-Object -ExpandProperty FullName

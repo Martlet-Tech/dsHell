@@ -1,0 +1,128 @@
+/**
+ * 启动页的编排层：接线事件、切换状态、维持 `window.__dshell` 老通道。
+ *
+ * ## 状态是数据，不是文件
+ *
+ * 这个页面有四种状态（体检中 / 安装中 / 失败 / 淡出），它们**共用同一份 DOM
+ * 和同一条事件总线**。所以状态切换全都是同一份文档上的函数调用，
+ * **不是加载另一个页面** —— 导航会销毁文档，而"导航到一个没有监听者的页面"
+ * 正是 08 花大力气修掉的那个缺陷（`about:blank` / `restart_guard`）。
+ *
+ * ## `window.__dshell` 必须显式挂回 window
+ *
+ * Rust 侧用 `window.eval("window.__dshell&&window.__dshell.xxx()")` 单向调用
+ * （`main.rs` 的 `splash_status` / `splash_fail` / `leave` / `restarting`）。
+ * module 有自己的作用域、**不会**把导出挂到 `window` 上，所以这里必须手动挂。
+ * 漏挂一个的后果是**静默无反应**（Rust 那个 `&&` 会安静跳过），不是报错。
+ */
+
+import { STEP_IDS } from "./labels.js";
+import { stage, failEl, panel, logEl, stepsEl, btnInstall, btnQuit, skipEl } from "./dom.js";
+import { decode, tauri } from "./transport.js";
+import { toast } from "./toast.js";
+import { ensureRow, renderStep } from "./steps.js";
+import { paint, installRunning, oneClick } from "./install.js";
+import { setDone } from "./state.js";
+
+/**
+ * 老通道：Rust 单向 `eval` 的落点。**契约，不要改名。**
+ */
+window.__dshell = {
+  /** 启动页上那一行状态文字（base64 载荷）。 */
+  statusB64(payload) {
+    const li = ensureRow("launch");
+    li.dataset.state = "checking";
+    li.querySelector(".detail").textContent = decode(payload);
+  },
+  /** handoff 成功：整页淡出，随后窗口被导航到 dsh。 */
+  leave() {
+    setDone(true);
+    stage.classList.add("leaving");
+  },
+  /** 失败卡片（base64 载荷，可能含 dsh 的原始输出，必须走转义过的插入方式）。 */
+  failB64(payload) {
+    const li = ensureRow("launch");
+    li.dataset.state = "failed";
+    li.querySelector(".detail").textContent = "启动失败";
+    failEl.className = "fail show";
+    failEl.innerHTML = decode(payload).replace(/\n/g, "<br>");
+  },
+  /** 「重启 dsh 后端」把窗口导航回本页后调用：把上次留下的失败卡片、
+   *  步骤状态和安装面板清干净，否则用户会看到上一次会话的残留结论。 */
+  restarting() {
+    setDone(false);
+    stage.classList.remove("leaving");
+    failEl.className = "fail";
+    failEl.innerHTML = "";
+    panel.hidden = true;
+    logEl.textContent = "";
+    document.querySelector("#inst-title").textContent = "正在安装";
+    document.querySelector("#inst-pct").textContent = "";
+    document.querySelector("#inst-elapsed").textContent = "";
+    stepsEl.innerHTML = "";
+    STEP_IDS.forEach((id) => renderStep({ id: id, state: "pending", detail: "等待检查" }));
+  },
+};
+
+/**
+ * 注册事件监听并做首次接线。
+ *
+ * **监听就绪后才叫体检** —— 顺序不能反，否则首批 `doctor://step` 事件会丢在
+ * 还没注册的窗口上。
+ */
+async function wire() {
+  const T = tauri();
+  if (!T) {
+    toast("无法与后端通信（__TAURI__ 未注入），请查看日志文件。");
+    return;
+  }
+  await T.event.listen("doctor://step", (e) => renderStep(e.payload));
+
+  await T.event.listen("doctor://done", (e) => {
+    const p = e.payload || {};
+    const auto = p.auto || [];
+    btnInstall.disabled = auto.length === 0;
+    btnInstall.textContent = auto.length ? "一键安装" : "无需安装";
+    if (p.allOk) {
+      btnInstall.hidden = true;
+      skipEl.hidden = true;
+    } else {
+      btnInstall.hidden = false;
+      skipEl.hidden = false;
+    }
+  });
+
+  await T.event.listen("install://progress", (e) => paint(e.payload));
+
+  await T.event.listen("install://done", (e) => {
+    const p = e.payload || {};
+    if (p.cancelled) {
+      document.querySelector("#inst-title").textContent = "已取消";
+    } else if (p.ok) {
+      document.querySelector("#inst-title").textContent = "安装完成，正在复检…";
+    } else {
+      document.querySelector("#inst-title").textContent = "安装失败";
+      if (p.error) toast(p.error);
+    }
+  });
+
+  document.querySelector("#inst-cancel").onclick = () => T.core.invoke("install_cancel");
+  btnInstall.onclick = oneClick;
+  btnQuit.onclick = () => T.core.invoke("app_quit");
+  skipEl.onclick = (e) => {
+    e.preventDefault();
+    T.core.invoke("app_skip_doctor");
+  };
+
+  // 监听就绪后再叫体检，事件一条都不会丢
+  T.core.invoke("doctor_run").catch((e) => toast(String(e)));
+}
+
+// 首屏先把步骤列出来（"等待检查"），体检结果到了再逐行覆盖。
+STEP_IDS.forEach((id) => renderStep({ id: id, state: "pending", detail: "等待检查" }));
+
+wire();
+
+// 走到这里说明所有模块都加载并执行成功了。置这个标志让 index.html 里那段
+// 内联兜底闭嘴 —— 否则它会为「已恢复」的早期错误报一张假卡片。
+window.__dshellBooted = true;

@@ -405,3 +405,24 @@ restarting() {
 本地 checkout 装 dsh —— **更新前必须校验当前 dsh 确实来自 npm 全局**（`config.rs`
 缓存了 `dsh` 路径，与 `npm prefix -g` 比对），否则会装出一份 DShell 根本不启动的
 第二份。这条留给 09。
+
+---
+
+## 附注（2026-09-20，立项 [09](../plan/09-dsh-update.md) 时补记）
+
+三处需要更正或补充，**原文保持不动**：
+
+1. **上面「更新功能只剩三件事…调 `restart_dsh`」这句不准确。** `restart_dsh` 是
+   "停完立刻起"（`reset_handoff` → `run_doctor` → `start_handoff`），中间**没有**插
+   `npm i -g` 的位置，整条不能复用。真正可复用的是 `reset_handoff` 这个"停"原语
+   （已含 `kill_tree` + `wait_process_exit` 超时确认）。故 09 的第一步是把它拆成
+   `stop_dsh` / `start_dsh` / `show_splash` 三个原语。
+2. **① 里「手工装/卸了 dsh 插件」这条动机，对"更新插件本身"不成立。**
+   `plugin::ensure_installed` 的第一条不变量是"目标存在且完整就**永不覆盖**"
+   （为保护开发者的 junction），所以它只在**首次**安装时生效。DShell 升级后，
+   已装用户手里仍是**旧副本**（开发机是 junction，不受影响）。本项的 `restart_dsh`
+   会跑到 `probe_picker` → `ensure_installed`，所以**拆分完成后，"重启"天然就是
+   重装入口**，不需要为此另加托盘按钮；前提是 `ensure_installed` 先做到版本感知。
+3. **`roadmap.md` 已重编号**：单实例条目收口后删除，后续条目上移，所以本文开头
+   "对应 `roadmap.md` 第 4 条（版本更新）"里的**第 4 条现为第 3 条**。本文并非那条
+   本身，只是它的前置。

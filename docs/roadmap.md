@@ -27,6 +27,8 @@
 | 单实例 | 只要还有**任意一个** dsh 后端活着，Windows 上被 node 加载的 native addon 就锁着要覆盖的文件，`npm i -g` 会失败或留下半个安装 | ✅ [closed/07](closed/07-single-instance.md) |
 | 重启 dsh 后端 | 更新执行完必须重起 dsh 才生效 | ✅ [closed/08](closed/08-restart-dsh.md) |
 
+→ **在办**：[docs/plan/09-dsh-update.md](plan/09-dsh-update.md)
+
 ## 4. 设置窗口
 
 托盘与关闭行为已做完（见 `docs/closed/03-tray-and-close-behavior.md`）。下一步是设置窗口本身：
@@ -44,3 +46,6 @@
 - web / headless 两个 profile 切换
 - 托盘图标状态化（tooltip 显示后端状态；本轮只做了图标与两个动作）
 - 关闭确认的「不再提示」选项（本轮明确未做，每次点 × 都会问）
+- 自带插件（`dshell-directory-picker`）的版本感知刷新：`plugin::ensure_installed`
+  现在是"目标存在且完整就永不覆盖"，所以 DShell 升级后，已装用户手里仍是**旧副本**
+  （开发机是 junction，不受影响）。见 [closed/08](closed/08-restart-dsh.md) 的附注

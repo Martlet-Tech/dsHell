@@ -253,7 +253,7 @@ fn run_doctor(app: &AppHandle, window: &WebviewWindow, then_handoff: bool) {
 
 /// 起 dsh 并把窗口导航到它。
 ///
-/// **可重入**：重启走的也是这条路径（先 `reset_handoff`，再调它）。所以这里不再
+/// **可重入**：重启走的也是这条路径（先 `stop_dsh`，再调它）。所以这里不再
 /// 依赖"只跑一次"的假设，改由 `dsh_generation` 把并发的、过期的等待线程分流掉。
 fn start_handoff(app: AppHandle, window: WebviewWindow) {
     let generation = {
@@ -363,7 +363,46 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
     });
 }
 
+/// 把窗口导航回启动页，并清掉上一轮的残留（失败卡片 / 步骤状态 / 安装面板）。
+///
+/// 返回值**只表示"知不知道启动页地址"**，不表示导航成功与否：
+///
+///   * `false` = 不知道启动页地址。这是**必须放弃**的情况 —— 后续的进度与失败
+///     卡片都会发给一个没有监听者的页面，用户只会看到界面莫名其妙地坏掉
+///     （08 记的 `about:blank` 就是这一类）。
+///   * 导航本身失败（parse 不了 / navigate 报错）只记日志并返回 `true` 继续 ——
+///     与拆分前一致：那时也是"日志一下，接着停 dsh"。
+///
+/// 拆出来的原因见 `stop_dsh` 的说明：重启与更新前半段完全相同，只有中段不同。
+fn show_splash(app: &AppHandle, window: &WebviewWindow) -> bool {
+    let Some(splash) = app.state::<AppState>().splash_url() else {
+        log("splash: url unknown - cannot show the splash page");
+        return false;
+    };
+    match splash.parse::<tauri::Url>() {
+        Ok(parsed) => match window.navigate(parsed) {
+            Ok(()) => {
+                log("splash: navigated back to the splash page");
+                // 让启动页完成加载与事件注册：dsh 启动失败时那条 `doctor://step`
+                // 不能丢在没人听的窗口上。
+                std::thread::sleep(SPLASH_SETTLE);
+                let _ = window.eval("window.__dshell&&window.__dshell.restarting()");
+            }
+            Err(e) => log(&format!("splash: navigate failed: {e}")),
+        },
+        Err(e) => log(&format!("splash: url unparsable ({e}): {splash}")),
+    }
+    true
+}
+
 /// 停掉当前 dsh，并把 handoff 状态复位到「可以再来一次」。
+///
+/// **这是"停"这一半的独立原语**，重启与更新共用：
+///
+/// ```text
+/// restart_dsh = show_splash + stop_dsh + start_dsh
+/// update_dsh  = show_splash + stop_dsh + install(dsh) + start_dsh
+/// ```
 ///
 /// 顺序是有讲究的，每一步都在挡一个具体的失败：
 ///
@@ -372,9 +411,10 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
 ///   2. `kill_tree` —— cmd → npm → node，只杀直接子进程会留下占着端口的 node。
 ///   3. **`wait_process_exit`** —— `taskkill` 返回 0 只证明"信号发出去了"。
 ///      必须等它真的没了，否则新起的 dsh 会撞上旧后端持有的会话锁
-///      （`SessionAlreadyOwnedError`，见 roadmap #1）。
+///      （`SessionAlreadyOwnedError`，见 roadmap #1）；更新时更要等，因为
+///      `npm i -g` 要覆盖的文件正被那个进程锁着。
 ///   4. 复位 `handoff_started`，下一个 `start_handoff` 才不会被闩挡住。
-fn reset_handoff(app: &AppHandle) -> bool {
+fn stop_dsh(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
 
     // 1) 作废当前代号：旧等待线程从这一刻起只是"过期的旁观者"。
@@ -392,31 +432,51 @@ fn reset_handoff(app: &AppHandle) -> bool {
     state.handoff_started.store(false, Ordering::SeqCst);
 
     if pid == 0 {
-        log("restart: no dsh process to stop");
+        log("stop dsh: no dsh process to stop");
         return true;
     }
 
     // 2) + 3)
-    log(&format!("restart: killing dsh process tree (pid {pid})"));
+    log(&format!("stop dsh: killing dsh process tree (pid {pid})"));
     proc::kill_tree(pid);
     let exited = win32::wait_process_exit(pid, DSH_EXIT_TIMEOUT);
     if exited {
-        log(&format!("restart: dsh (pid {pid}) exited"));
+        log(&format!("stop dsh: dsh (pid {pid}) exited"));
     } else {
         log(&format!(
-            "restart: dsh (pid {pid}) still alive after {}s",
+            "stop dsh: dsh (pid {pid}) still alive after {}s",
             DSH_EXIT_TIMEOUT.as_secs()
         ));
     }
     exited
 }
 
-/// 重启 dsh：停掉旧的，再走一遍完整的启动流程。
+/// 起 dsh：跑一遍体检，全绿则 handoff。**"起"这一半的独立原语。**
 ///
-/// 为什么走完整流程（体检 + `start_handoff`）而不是只重起进程：用户点「重启」
-/// 最常见的动机就是"我改了什么，让它按新的来"（改了 dsh 路径、装了插件、
-/// 更新了版本）。只重起进程会跳过体检，把"改了路径却没生效"这类问题留到后面
-/// 才以更难懂的形式暴露。体检本身是秒级的。
+/// 为什么走完整体检而不是直接 `start_handoff`：用户点「重启」最常见的动机就是
+/// "我改了什么，让它按新的来"（改了 dsh 路径、装了插件、更新了版本）。只重起进程
+/// 会跳过体检，把"改了路径却没生效"这类问题留到后面才以更难懂的形式暴露。
+/// 体检本身是秒级的。
+fn start_dsh(app: &AppHandle, window: &WebviewWindow) {
+    run_doctor(app, window, !app.state::<AppState>().hold);
+}
+
+/// 重启 dsh = `show_splash` + `stop_dsh` + `start_dsh`。
+///
+/// 三个原语是分开的，因为**更新只需要换掉中间那一段**：
+///
+/// ```text
+/// restart_dsh = show_splash + stop_dsh + start_dsh
+/// update_dsh  = show_splash + stop_dsh + install(dsh) + start_dsh
+/// ```
+///
+/// 所以这里刻意不把"停"和"起"再揉在一起 —— 揉在一起就会变成
+/// "重启 / 停 / 起"三层，而那正是要避免的重复（见 docs/plan/09）。
+///
+/// 为什么走完整流程（体检 + handoff）而不是只重起进程：用户点「重启」最常见的
+/// 动机就是"我改了什么，让它按新的来"（改了 dsh 路径、装了插件、更新了版本）。
+/// 只重起进程会跳过体检，把"改了路径却没生效"这类问题留到后面才以更难懂的形式
+/// 暴露。体检本身是秒级的。
 fn restart_dsh(app: &AppHandle) {
     {
         let state = app.state::<AppState>();
@@ -460,8 +520,8 @@ fn do_restart_dsh(app: &AppHandle) {
     // 拿不到启动页 URL 就**放弃重启**，而不是"留在当前页继续"。因为当前页要么是
     // dsh（它马上会被杀掉 → 白屏或错误页），要么是空白页；两种情况下进度和失败卡片
     // 都没有监听者，用户只会看到界面莫名其妙地坏掉。
-    let Some(splash) = app.state::<AppState>().splash_url() else {
-        log("restart: splash url unknown - aborting (the window would have nowhere to show progress)");
+    if !show_splash(app, &window) {
+        log("restart: aborting (the window would have nowhere to show progress)");
         app.state::<AppState>()
             .restart_guard
             .store(false, Ordering::SeqCst);
@@ -474,25 +534,12 @@ fn do_restart_dsh(app: &AppHandle) {
             ),
         );
         return;
-    };
-    match splash.parse::<tauri::Url>() {
-        Ok(parsed) => match window.navigate(parsed) {
-            Ok(()) => {
-                log("restart: navigated back to the splash page");
-                // 让启动页完成加载与事件注册：dsh 启动失败时那条 `doctor://step`
-                // 不能丢在没人听的窗口上。
-                std::thread::sleep(SPLASH_SETTLE);
-                let _ = window.eval("window.__dshell&&window.__dshell.restarting()");
-            }
-            Err(e) => log(&format!("restart: navigate to splash failed: {e}")),
-        },
-        Err(e) => log(&format!("restart: splash url unparsable ({e}): {splash}")),
     }
 
     // 窗口可能缩在托盘里：把界面亮出来，否则用户看不到任何反应。
     lifecycle::restore_main_window(app);
 
-    let stopped = reset_handoff(app);
+    let stopped = stop_dsh(app);
 
     // 无论成败都要放行体检通道，否则失败卡片上的「重新检查」会变成死按钮。
     app.state::<AppState>()
@@ -518,7 +565,7 @@ fn do_restart_dsh(app: &AppHandle) {
         return;
     }
 
-    run_doctor(app, &window, !app.state::<AppState>().hold);
+    start_dsh(app, &window);
 }
 
 /// 起 `dsh web`：隐藏窗口、stdout/stderr 都接管、PATH 里前置用户指定的目录

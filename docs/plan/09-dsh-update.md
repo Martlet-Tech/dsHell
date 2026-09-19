@@ -346,6 +346,7 @@ T1 的关键是**只看不动**：现有 `npm view` 调用是只读的，但必�
 ### 实施顺序
 
 1. 拆分 `stop_dsh` / `start_dsh` / `show_splash`（纯重构）→ **先跑通重启回归**
+   ✅ **已实施并实测通过**（2026-09-20）。实测数据见下。
 2. UI 按职责拆成 module（纯重构）→ **实测 module 能被加载**（MIME 校验）
 3. 托盘两项 + `ui_text` 文案（此时"更新"可先只做"检查"）
 4. 版本检查：registry 感知的 dist-tags / versions 采集 + 预发布 semver 比较 + 来源校验
@@ -362,21 +363,57 @@ T1 的关键是**只看不动**：现有 `npm view` 调用是只读的，但必�
 
 ### main.rs —— 重启拆成原语
 
+**✅ 已实施**（2026-09-20，纯重构、行为不变）：
+
 ```rust
 /// 把窗口导航回启动页并清掉上一轮的残留（失败卡片 / 步骤 / 面板）。
 /// 拿不到 splash URL 时返回 false（调用方据此放弃，而不是留在 dsh 页面上）。
 fn show_splash(app: &AppHandle, window: &WebviewWindow) -> bool;
 
 /// 停 dsh：作废代数 → 清 launch_url → 复位 handoff_started → kill_tree → wait_process_exit。
-/// 返回"是否确认已退出"。**现 `reset_handoff` 改名**，逻辑不动。
+/// 返回"是否确认已退出"。**由 `reset_handoff` 改名而来**，逻辑未动。
 fn stop_dsh(app: &AppHandle) -> bool;
 
-/// 起 dsh：跑体检，全绿则 handoff。**现 `run_doctor(app, w, true)` 的调用点**。
+/// 起 dsh：跑体检，全绿则 handoff。现 `run_doctor(app, w, !hold)` 的单个调用点。
 fn start_dsh(app: &AppHandle, window: &WebviewWindow);
 
 fn restart_dsh(app: &AppHandle);   // show_splash + stop_dsh + start_dsh
-fn update_dsh(app: &AppHandle);    // show_splash + stop_dsh + install(Dsh) + start_dsh
+fn update_dsh(app: &AppHandle);    // show_splash + stop_dsh + install(Dsh) + start_dsh（待做）
 ```
+
+`show_splash` 的返回值**只表示"知不知道启动页地址"**，不表示导航成败 —— 与拆分前的判定一致（`navigate` 失败只记日志并继续；不知道地址才放弃）。
+
+**日志前缀随之改名**（`restart:` → `splash:` / `stop dsh:`），已在
+[closed/08 附注二](../closed/08-restart-dsh.md) 列表对照，按日志排查时对照即可。
+
+#### 重启回归实测（2026-09-20，连续 5 次重启）
+
+产物：`scripts\dev-build.ps1` 出的 `target\20260920-043753\`（含 `plugin\`）。
+日志：`%USERPROFILE%\.dshell\dshell-poc.log`（本次段从第 2542 行起）。
+
+| 验收点 | 结果 | 证据 |
+| --- | --- | --- |
+| 新前缀如期出现 | ✅ | `splash: navigated back` 5 次；`stop dsh: killing` 5 次；`stop dsh: dsh (pid N) exited` 5 次 |
+| 旧前缀只属旧实例 | ✅ | `restart: killing` 3 次、`restart: navigated back` 3 次 —— 均在本次段之前，来自 `C:\Tools\dshell` 的旧副本 |
+| 无致命错误 | ✅ | `FATAL` 0、`panicked` 0、`url unparsable` 0、`navigate failed` 0 |
+| 旧后端都停干净 | ✅ | `still alive after` **0 次**（没有一次撞 15s 超时） |
+| 代数递增 | ✅ | 3 → 5 → 7 → 9 → 11，步进 2 |
+| 无孤儿实例 | ✅ | `dshell` 只剩 1 个（即本次测试的实例） |
+| `about:blank` 未复现 | ✅ | 全文仅 1 处，在**第 2355 行**（08 记录的历史现场，早于本次段）；且新 exe 二进制内**已不含** `about:blank` 字符串 |
+
+**额外覆盖：快速连续重启下的代数分流。** 本次日志首次出现
+
+```
+stop dsh: killing dsh process tree (pid 7308)
+handoff: generation 7 superseded - its dsh exited as expected
+stop dsh: dsh (pid 7308) exited
+```
+
+即上一代进程**尚未打印地址就被下一轮取代**。`dsh_generation` 正确判别为"上一代的
+正常死亡"而**没有画假的失败卡片** —— 这顺带覆盖了 08 ③ 里标为"未复测"的并发路径。
+
+**clippy**：无新增告警（现有 5 条全部来自 `installer.rs` / `picker.rs` 与
+`splash_status`/`splash_fail`，`git blame` 确认属 `288e708`，早于本项）。
 
 `restart_guard` 的持有范围（更新时）：
 

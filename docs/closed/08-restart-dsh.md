@@ -426,3 +426,23 @@ restarting() {
 3. **`roadmap.md` 已重编号**：单实例条目收口后删除，后续条目上移，所以本文开头
    "对应 `roadmap.md` 第 4 条（版本更新）"里的**第 4 条现为第 3 条**。本文并非那条
    本身，只是它的前置。
+
+## 附注二（2026-09-20，拆分落地时补记）
+
+09 的第 1 步（拆 `stop_dsh` / `start_dsh` / `show_splash`）已实施。**本文 ③ 里引用的
+日志行因此有两处改名**，按日志排查时要注意：
+
+| 本文 ③ 引用的旧日志 | 现在的日志 |
+| --- | --- |
+| `restart: navigated back to the splash page` | `splash: navigated back to the splash page` |
+| `restart: killing dsh process tree (pid N)` | `stop dsh: killing dsh process tree (pid N)` |
+| `restart: dsh (pid N) exited` | `stop dsh: dsh (pid N) exited` |
+| `restart: no dsh process to stop` | `stop dsh: no dsh process to stop` |
+| `restart: dsh (pid N) still alive after Ns` | `stop dsh: dsh (pid N) still alive after Ns` |
+
+**行为没有变化**，只是把"停"与"回到启动页"这两件事从 `restart:` 前缀里分出来 ——
+它们现在是独立原语，更新也要用同一条路径。
+
+其余 `restart:` 前缀的日志（`already in progress` / `panicked` / `main window is gone` /
+`aborting`）仍在 `restart_dsh` 自己的编排里，**未改**。
+`doctor: suppressed (a restart is in progress)` 亦未改。

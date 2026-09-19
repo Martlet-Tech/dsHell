@@ -6,7 +6,7 @@
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    App, AppHandle, Runtime,
+    App, AppHandle,
 };
 
 use crate::{lifecycle, ui_text};
@@ -14,6 +14,7 @@ use crate::{lifecycle, ui_text};
 /// 托盘菜单项 id（集中一处，避免字符串散落）
 const MENU_ID_QUIT: &str = "tray-quit";
 const MENU_ID_OPEN_BROWSER: &str = "tray-open-browser";
+const MENU_ID_RESTART_DSH: &str = "tray-restart-dsh";
 /// 托盘图标 id
 const TRAY_ID: &str = "main-tray";
 
@@ -23,12 +24,17 @@ enum TrayAction {
     RestoreWindow,
     /// 菜单「在浏览器中打开」
     OpenInBrowser,
+    /// 菜单「重启 dsh 后端」
+    RestartDsh,
     /// 菜单「完全退出」
     Quit,
 }
 
 /// 建托盘。在 `setup` 里调用一次。
-pub fn init<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
+///
+/// 不泛型化 `Runtime`（与 `dispatch` 同因）：本应用只有 wry 一个运行时，而
+/// 「重启 dsh」那条链上的 `run_doctor` / `start_handoff` / `splash_*` 都是具体的。
+pub fn init(app: &App) -> tauri::Result<()> {
     let open_browser_item = MenuItem::with_id(
         app,
         MENU_ID_OPEN_BROWSER,
@@ -36,8 +42,15 @@ pub fn init<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let restart_item = MenuItem::with_id(
+        app,
+        MENU_ID_RESTART_DSH,
+        ui_text::menu_restart_dsh(),
+        true,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, MENU_ID_QUIT, ui_text::menu_quit(), true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_browser_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&open_browser_item, &restart_item, &quit_item])?;
 
     // 复用 exe 图标：不新增任何资源文件。
     // 拿不到时（tauri.conf.json 的 bundle.icon 为空）托盘无图标，但仍要建出来，
@@ -53,6 +66,8 @@ pub fn init<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
                 dispatch(app, TrayAction::Quit);
             } else if id == MENU_ID_OPEN_BROWSER {
                 dispatch(app, TrayAction::OpenInBrowser);
+            } else if id == MENU_ID_RESTART_DSH {
+                dispatch(app, TrayAction::RestartDsh);
             }
         })
         .on_tray_icon_event(|tray, event| {
@@ -78,10 +93,15 @@ pub fn init<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
 }
 
 /// 唯一的动作出口：托盘不自己干副作用，一律交给 `lifecycle` 或壳层的 `open_dsh_in_browser`。
-fn dispatch<R: Runtime>(app: &AppHandle<R>, action: TrayAction) {
+///
+/// 故意**不泛型化** `Runtime`：`restart_dsh` 要落进一个后台线程，而它依赖的
+/// `run_doctor` / `start_handoff` / `splash_*` 都写死了具体运行时。为了托盘这一处
+/// 把整条调用链都泛型化不值得 —— 本应用只有 wry 一个运行时。
+fn dispatch(app: &AppHandle, action: TrayAction) {
     match action {
         TrayAction::RestoreWindow => lifecycle::restore_main_window(app),
         TrayAction::OpenInBrowser => crate::open_dsh_in_browser(app),
+        TrayAction::RestartDsh => crate::restart_dsh(app),
         TrayAction::Quit => lifecycle::quit(app),
     }
 }

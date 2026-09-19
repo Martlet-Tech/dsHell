@@ -50,6 +50,13 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const STDERR_TAIL: usize = 12;
 /// 页面多久没来叫体检就自己跑（兜底，避免页面出问题时卡在启动页）。
 const PAGE_FALLBACK: Duration = Duration::from_millis(2500);
+/// 重启时等旧 dsh 真正退出的上限。
+///
+/// 为什么不无限等：卡死的 dsh 会让「重启」永远不返回，而**不重启**比
+/// 冒险起第二个后端更安全 —— 两个后端会抢同一份会话锁。所以超时后放弃并说明。
+const DSH_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// 导航回启动页后，等它加载完并注册好事件监听的时间。
+const SPLASH_SETTLE: Duration = Duration::from_millis(700);
 /// 第二个实例找已有窗口的等待上限（覆盖"用户手快双击"的窗口创建期）。
 const FOCUS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -60,12 +67,32 @@ pub struct AppState {
     /// 正在跑的安装进程
     install_pid: AtomicU32,
     cancel: proc::Cancel,
+    /// 「已经在起 dsh 了」的闩。**重启时必须复位**，否则第二次 start_handoff 直接早退。
     handoff_started: AtomicBool,
+    /// dsh 的代数，每起一次 +1。
+    ///
+    /// 重启会让上一代的等待线程"过期"：它等的那个进程被杀掉后，`wait_for_url`
+    /// 会以"dsh 还没打印地址就退出了"收场 —— 那是**上一代的正常死亡**，不是故障。
+    /// 没有这个代号，重启时就会往刚回到启动页的窗口上画一张假的失败卡片。
+    dsh_generation: AtomicU32,
+    /// 重启正在进行的闩：托盘连点两下不该起两条重启线程。
+    restarting: AtomicBool,
+    /// 重启期间抑制启动页自己发起的体检。
+    ///
+    /// 重启会把窗口导航回启动页，而启动页**加载完就自动 invoke `doctor_run`**
+    /// （那是首启的设计：监听就绪后再叫，事件不会丢）。如果在旧 dsh 还没停干净时
+    /// 放它跑，它会一路 handoff 出**第二个 dsh 后端** —— 正是重启最不能出的结果。
+    /// 所以这期间让 `doctor_run` 直接返回，由重启流程自己在停干净之后叫一次。
+    restart_guard: AtomicBool,
     doctor_requested: AtomicBool,
     /// DSHELL_SPLASH_HOLD：停在报告页不 handoff，方便截图/调动画
     hold: bool,
     /// dsh 的入口地址（含 token）。handoff 成功后写入，托盘「在浏览器中打开」读它。
     launch_url: Mutex<String>,
+    /// 启动页自己的 URL。重启时要导航回来，而它的形状由 Tauri 决定
+    /// （Windows 上是 `http://tauri.localhost/index.html`），所以建窗后实测一次存下来，
+    /// 不硬编码。
+    splash_url: Mutex<String>,
 }
 
 impl AppState {
@@ -75,9 +102,13 @@ impl AppState {
             install_pid: AtomicU32::new(0),
             cancel: proc::Cancel::new(),
             handoff_started: AtomicBool::new(false),
+            dsh_generation: AtomicU32::new(0),
+            restarting: AtomicBool::new(false),
+            restart_guard: AtomicBool::new(false),
             doctor_requested: AtomicBool::new(false),
             hold,
             launch_url: Mutex::new(String::new()),
+            splash_url: Mutex::new(String::new()),
         }
     }
 
@@ -91,6 +122,36 @@ impl AppState {
     pub fn launch_url(&self) -> Option<String> {
         let u = self.launch_url.lock().ok()?;
         (!u.is_empty()).then(|| u.clone())
+    }
+
+    pub fn set_splash_url(&self, url: &str) {
+        if let Ok(mut u) = self.splash_url.lock() {
+            *u = url.to_string();
+        }
+    }
+
+    pub fn splash_url(&self) -> Option<String> {
+        let u = self.splash_url.lock().ok()?;
+        (!u.is_empty()).then(|| u.clone())
+    }
+
+    /// 领一个新代号，表示"这一代 dsh 由我负责"。
+    fn begin_dsh_generation(&self) -> u32 {
+        self.dsh_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// 这个代号还是当前代吗？不是就说明它等的那次 handoff 已经被重启取代。
+    fn is_current_generation(&self, generation: u32) -> bool {
+        self.dsh_generation.load(Ordering::SeqCst) == generation
+    }
+
+    /// 当前 dsh 后端的 pid（0 = 没有）。
+    pub fn dsh_pid(&self) -> u32 {
+        self.dsh_pid.load(Ordering::SeqCst)
+    }
+
+    fn set_dsh_pid(&self, pid: u32) {
+        self.dsh_pid.store(pid, Ordering::SeqCst);
     }
 }
 
@@ -190,18 +251,27 @@ fn run_doctor(app: &AppHandle, window: &WebviewWindow, then_handoff: bool) {
 
 // ───────────────────────────── handoff ─────────────────────────────
 
+/// 起 dsh 并把窗口导航到它。
+///
+/// **可重入**：重启走的也是这条路径（先 `reset_handoff`，再调它）。所以这里不再
+/// 依赖"只跑一次"的假设，改由 `dsh_generation` 把并发的、过期的等待线程分流掉。
 fn start_handoff(app: AppHandle, window: WebviewWindow) {
-    {
+    let generation = {
         let state = app.state::<AppState>();
         if state.handoff_started.swap(true, Ordering::SeqCst) {
+            // 已经在起 dsh：不重复 spawn。
             return;
         }
-    }
+        state.begin_dsh_generation()
+    };
 
     let cfg = Config::load();
     let child = match spawn_dsh(&cfg) {
         Ok(c) => c,
         Err(e) => {
+            app.state::<AppState>()
+                .handoff_started
+                .store(false, Ordering::SeqCst);
             log(&format!("FATAL: could not start `dsh web`: {e}"));
             let _ = app.emit(
                 "doctor://step",
@@ -218,8 +288,8 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
     };
 
     let pid = child.id();
-    app.state::<AppState>().dsh_pid.store(pid, Ordering::SeqCst);
-    log(&format!("spawned dsh web (pid {pid})"));
+    app.state::<AppState>().set_dsh_pid(pid);
+    log(&format!("spawned dsh web (pid {pid}, generation {generation})"));
 
     let _ = app.emit(
         "doctor://step",
@@ -232,6 +302,15 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
         let mut child = child;
         match wait_for_url(&mut child, &window, err_tail) {
             Ok(url) => {
+                // 等到了地址，但这一代可能已经被重启取代（重启时旧进程会被杀，
+                // 而旧进程被杀正好会让 wait_for_url 返回错误而不是成功 —— 这里
+                // 只是把"恰好成功但已过期"这条窄缝也堵上）。
+                if !app.state::<AppState>().is_current_generation(generation) {
+                    log(&format!(
+                        "handoff: generation {generation} superseded - ignoring its launch url"
+                    ));
+                    return;
+                }
                 log(&format!("launch url: {url}"));
                 match url.parse::<tauri::Url>() {
                     Ok(parsed) => {
@@ -265,6 +344,13 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
                 }
             }
             Err(e) => {
+                // 重启时旧进程被杀 → 这里必然报错。那不是故障，是上一代的正常收场。
+                if !app.state::<AppState>().is_current_generation(generation) {
+                    log(&format!(
+                        "handoff: generation {generation} superseded - its dsh exited as expected"
+                    ));
+                    return;
+                }
                 log(&format!("FATAL: {e}"));
                 let _ = app.emit(
                     "doctor://step",
@@ -275,6 +361,164 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
             }
         }
     });
+}
+
+/// 停掉当前 dsh，并把 handoff 状态复位到「可以再来一次」。
+///
+/// 顺序是有讲究的，每一步都在挡一个具体的失败：
+///
+///   1. **先作废当前代号** —— 通知还在等地址的那个线程"你已经是上一代了"，
+///      它会安静退出，而不是往重新显示的启动页上画一张假的失败卡片。
+///   2. `kill_tree` —— cmd → npm → node，只杀直接子进程会留下占着端口的 node。
+///   3. **`wait_process_exit`** —— `taskkill` 返回 0 只证明"信号发出去了"。
+///      必须等它真的没了，否则新起的 dsh 会撞上旧后端持有的会话锁
+///      （`SessionAlreadyOwnedError`，见 roadmap #1）。
+///   4. 复位 `handoff_started`，下一个 `start_handoff` 才不会被闩挡住。
+fn reset_handoff(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+
+    // 1) 作废当前代号：旧等待线程从这一刻起只是"过期的旁观者"。
+    state.dsh_generation.fetch_add(1, Ordering::SeqCst);
+
+    let pid = state.dsh_pid();
+    state.set_dsh_pid(0);
+    // URL 里的 token 绑在**那一个** dsh 进程上，它死了这个地址就没意义了。
+    // 不清掉的话，托盘「在浏览器中打开」会打开一个 401 的死页面。
+    if let Ok(mut u) = state.launch_url.lock() {
+        u.clear();
+    }
+
+    // 4 的铺垫：先允许下一次 handoff，再去做可能耗时的收尾。
+    state.handoff_started.store(false, Ordering::SeqCst);
+
+    if pid == 0 {
+        log("restart: no dsh process to stop");
+        return true;
+    }
+
+    // 2) + 3)
+    log(&format!("restart: killing dsh process tree (pid {pid})"));
+    proc::kill_tree(pid);
+    let exited = win32::wait_process_exit(pid, DSH_EXIT_TIMEOUT);
+    if exited {
+        log(&format!("restart: dsh (pid {pid}) exited"));
+    } else {
+        log(&format!(
+            "restart: dsh (pid {pid}) still alive after {}s",
+            DSH_EXIT_TIMEOUT.as_secs()
+        ));
+    }
+    exited
+}
+
+/// 重启 dsh：停掉旧的，再走一遍完整的启动流程。
+///
+/// 为什么走完整流程（体检 + `start_handoff`）而不是只重起进程：用户点「重启」
+/// 最常见的动机就是"我改了什么，让它按新的来"（改了 dsh 路径、装了插件、
+/// 更新了版本）。只重起进程会跳过体检，把"改了路径却没生效"这类问题留到后面
+/// 才以更难懂的形式暴露。体检本身是秒级的。
+fn restart_dsh(app: &AppHandle) {
+    {
+        let state = app.state::<AppState>();
+        // 托盘连点两下不该起两条重启线程互相杀
+        if state.restarting.swap(true, Ordering::SeqCst) {
+            log("restart: already in progress - ignoring");
+            return;
+        }
+    }
+
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // 闩的清除放在 `catch_unwind` **之后**：`do_restart_dsh` 里一次 panic
+        // 不该让 `restarting` 永远为真（那会让重启从此静默失效）。
+        //
+        // 注意 `[profile.release] panic = "abort"`：发布版里 panic 直接终止进程，
+        // 这个兜底其实只在 debug（unwind）下生效。发布版里进程都没了，闩自然无所谓。
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            do_restart_dsh(&app);
+        }));
+        if result.is_err() {
+            log("restart: panicked - the restarting latch is being cleared");
+        }
+        app.state::<AppState>().restarting.store(false, Ordering::SeqCst);
+    });
+}
+
+fn do_restart_dsh(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        log("restart: main window is gone - aborting");
+        return;
+    };
+
+    // 从现在到"旧 dsh 停干净"之间，不许启动页自己发起体检（见 restart_guard 的说明）。
+    app.state::<AppState>()
+        .restart_guard
+        .store(true, Ordering::SeqCst);
+
+    // 先把窗口从 dsh 页面弄回启动页，用户才有地方看进度。
+    //
+    // 拿不到启动页 URL 就**放弃重启**，而不是"留在当前页继续"。因为当前页要么是
+    // dsh（它马上会被杀掉 → 白屏或错误页），要么是空白页；两种情况下进度和失败卡片
+    // 都没有监听者，用户只会看到界面莫名其妙地坏掉。
+    let Some(splash) = app.state::<AppState>().splash_url() else {
+        log("restart: splash url unknown - aborting (the window would have nowhere to show progress)");
+        app.state::<AppState>()
+            .restart_guard
+            .store(false, Ordering::SeqCst);
+        splash_fail(
+            &window,
+            concat!(
+                "<b>无法重启</b>\n\n",
+                "没有记下启动页地址，重启后界面会无处显示进度。\n\n",
+                "请「完全退出」DShell 再重新打开。"
+            ),
+        );
+        return;
+    };
+    match splash.parse::<tauri::Url>() {
+        Ok(parsed) => match window.navigate(parsed) {
+            Ok(()) => {
+                log("restart: navigated back to the splash page");
+                // 让启动页完成加载与事件注册：dsh 启动失败时那条 `doctor://step`
+                // 不能丢在没人听的窗口上。
+                std::thread::sleep(SPLASH_SETTLE);
+                let _ = window.eval("window.__dshell&&window.__dshell.restarting()");
+            }
+            Err(e) => log(&format!("restart: navigate to splash failed: {e}")),
+        },
+        Err(e) => log(&format!("restart: splash url unparsable ({e}): {splash}")),
+    }
+
+    // 窗口可能缩在托盘里：把界面亮出来，否则用户看不到任何反应。
+    lifecycle::restore_main_window(app);
+
+    let stopped = reset_handoff(app);
+
+    // 无论成败都要放行体检通道，否则失败卡片上的「重新检查」会变成死按钮。
+    app.state::<AppState>()
+        .restart_guard
+        .store(false, Ordering::SeqCst);
+
+    if !stopped {
+        let _ = app.emit(
+            "doctor://step",
+            doctor::launch_step(
+                StepState::Warn,
+                "旧 dsh 没有及时退出，重启已放弃（避免两个后端抢同一份会话）",
+            ),
+        );
+        splash_fail(
+            &window,
+            concat!(
+                "<b>旧 dsh 没有退出，重启已放弃</b>\n\n",
+                "它的进程可能卡住了。请「完全退出」DShell，再重新打开。\n\n",
+                "这样做的原因：两个 dsh 后端会抢同一份会话锁"
+            ),
+        );
+        return;
+    }
+
+    run_doctor(app, &window, !app.state::<AppState>().hold);
 }
 
 /// 起 `dsh web`：隐藏窗口、stdout/stderr 都接管、PATH 里前置用户指定的目录
@@ -419,6 +663,12 @@ fn err_tail_html(tail: &Arc<Mutex<VecDeque<String>>>) -> String {
 /// 页面加载完注册好监听后主动叫一次（这样事件不会丢）；也是「重新检查」。
 #[tauri::command]
 async fn doctor_run(app: AppHandle) -> Result<(), String> {
+    // 重启期间不放行：启动页刚导航回来会自动叫这一下，而那时旧 dsh 可能还没停
+    // 干净。放它过去就会 handoff 出第二个后端。重启流程自己会在停干净后再叫。
+    if app.state::<AppState>().restart_guard.load(Ordering::SeqCst) {
+        log("doctor: suppressed (a restart is in progress)");
+        return Ok(());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let hold = app.state::<AppState>().hold;
         app.state::<AppState>()
@@ -647,6 +897,33 @@ fn main() {
                         let _ = open_in_browser(url.as_str());
                     }
                     internal || dsh
+                })
+                // 记下启动页自己的 URL —— **必须在页面真正加载时记**。
+                //
+                // 不能在建窗后立刻 `window.url()`：那时 WebView2 还没提交首次导航，
+                // 拿到的是 `about:blank`（实测踩过）。重启要导航回启动页，记错就会
+                // 把窗口导到一片白屏，而进度和失败卡片全发给没有监听者的空白页。
+                .on_page_load({
+                    let handle = app.handle().clone();
+                    move |_window, payload| {
+                        let url = payload.url().clone();
+                        // 只认我们自己的页面。刻意排除 `about:blank`：
+                        // 它同样以 `about` 开头，但它不是启动页。
+                        let is_splash = matches!(url.scheme(), "tauri" | "asset")
+                            || matches!(url.host_str(), Some("tauri.localhost"));
+                        if !is_splash {
+                            return;
+                        }
+                        // 建窗流程里 `manage` 就在 `build()` 之后，而此时事件循环还没
+                        // 转过，所以正常情况下这里一定拿得到状态；`try_state` 只是兜底，
+                        // 不能让"记 URL"这件事把启动搞崩。
+                        if let Some(state) = handle.try_state::<AppState>() {
+                            if state.splash_url().as_deref() != Some(url.as_str()) {
+                                log(&format!("splash url: {url}"));
+                                state.set_splash_url(url.as_str());
+                            }
+                        }
+                    }
                 })
                 .build()?;
 

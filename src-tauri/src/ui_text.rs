@@ -35,6 +35,12 @@ pub fn menu_quit() -> &'static str {
     }
 }
 
+pub fn menu_restart_dsh() -> &'static str {
+    match current() {
+        Lang::ZhCn => "重启 dsh 后端",
+    }
+}
+
 // ── 关闭确认弹窗（三键） ────────────────────────────────
 
 pub fn close_dialog_title() -> &'static str {

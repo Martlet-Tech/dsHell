@@ -22,6 +22,7 @@ mod plugin;
 mod proc;
 mod tray;
 mod ui_text;
+mod win32;
 
 /// 主窗口 label —— 全项目唯一来源，避免 "main" 字符串散落各处。
 pub const MAIN_WINDOW: &str = "main";
@@ -49,6 +50,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const STDERR_TAIL: usize = 12;
 /// 页面多久没来叫体检就自己跑（兜底，避免页面出问题时卡在启动页）。
 const PAGE_FALLBACK: Duration = Duration::from_millis(2500);
+/// 第二个实例找已有窗口的等待上限（覆盖"用户手快双击"的窗口创建期）。
+const FOCUS_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct AppState {
     /// dsh 后端进程树；只记 pid —— `taskkill /PID <pid> /T /F` 不需要 Child 句柄，
@@ -552,6 +555,28 @@ fn app_quit(app: AppHandle) {
 
 fn main() {
     let hold = std::env::var("DSHELL_SPLASH_HOLD").is_ok();
+
+    // 单实例：必须在建窗**之前**判定。
+    //
+    // 双击第二次时如果照常建窗，就会出现两个壳、两条 `dsh web`（内存成倍，而且
+    // 每个后端都持有 DSH 的会话锁，会干扰 session resume）。这里直接让第二个进程
+    // 把已有窗口叫到前面，然后退出。
+    //
+    // 注意 DSHELL_SPLASH_HOLD：那是调试开关，要能同时开两个（边看旧版边调新版），
+    // 所以它绕过单实例判定。
+    if !hold {
+        match win32::acquire_single_instance() {
+            win32::Instance::Primary => {}
+            win32::Instance::Duplicate => {
+                // 已有实例的窗口可能还没建出来（用户手快双击），给它一点时间。
+                let focused = win32::focus_existing_instance(FOCUS_TIMEOUT);
+                log(&format!(
+                    "single instance: another DShell is already running (focused={focused}) - exiting"
+                ));
+                std::process::exit(0);
+            }
+        }
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

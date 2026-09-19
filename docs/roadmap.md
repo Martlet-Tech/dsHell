@@ -8,6 +8,8 @@
 
 方案：命名互斥体（`CreateMutexW`）检测已有实例，存在则聚焦那个窗口。
 
+→ **在办**：[docs/plan/07-single-instance.md](plan/07-single-instance.md)
+
 ## 2. 强杀防孤儿进程
 
 正常关窗是干净的（`ExitRequested` → `taskkill /T /F`，端口释放）。但**任务管理器强杀时 `ExitRequested` 不触发**，清理代码不跑，留下孤儿 node 占着端口。
@@ -18,11 +20,20 @@
 
 `present` 交付物的下载走 WebView2 自己的下载流程，Tauri 默认不接管。可能点了没反应——**未验证**。
 
-## 4. 版本更新提示
+## 4. 版本更新提示与更新
 
 注意本机 dsh 是 `0.1.5-rc.1`（**预发布版**）。如果更新检查只看 `latest` dist-tag，会得出错误结论（可能提示降级）。
 
 应该取 `npm view @deepseek-ai/dsh dist-tags --json` 的所有 tag，做 **semver 预发布比较**，而不是字符串比较。查到新版后**要问用户**，不要静默升级。
+
+**依赖关系（顺序不能反）**：
+
+| 前置 | 为什么 |
+| --- | --- |
+| #1 单实例 | 只要还有**任意一个** dsh 后端活着，Windows 上被 node 加载的 native addon 就锁着要覆盖的文件，`npm i -g` 会失败或留下半个安装 |
+| **重启 dsh 后端** | 更新执行完必须重起 dsh 才生效 |
+
+→ 重启部分**在办**：[docs/plan/08-restart-dsh.md](plan/08-restart-dsh.md)（它不绑在更新上，独立就有价值：改了 dsh 路径、装了插件、dsh 卡住都用得上）
 
 ## 5. 设置窗口
 

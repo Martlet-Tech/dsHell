@@ -12,6 +12,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod auth_cookie;
 mod close_dialog;
 mod config;
 mod doctor;
@@ -59,6 +60,11 @@ const DSH_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 const SPLASH_SETTLE: Duration = Duration::from_millis(700);
 /// 第二个实例找已有窗口的等待上限（覆盖"用户手快双击"的窗口创建期）。
 const FOCUS_TIMEOUT: Duration = Duration::from_secs(5);
+/// 等 auth cookie 清理收尾的上限。
+///
+/// `WebviewWindow::cookies()` 是「发消息给 webview 线程 + 等回调」的同步调用，
+/// 卡住的话界面就永远到不了 dsh —— 那比多攒一条 cookie 严重得多。超时就照常导航。
+const PURGE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct AppState {
     /// dsh 后端进程树；只记 pid —— `taskkill /PID <pid> /T /F` 不需要 Child 句柄，
@@ -298,6 +304,29 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
 
     let err_tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
 
+    // 清陈旧 auth cookie 坐在哪一步，是权衡过的：
+    //
+    // - **不是**接在拿到 URL 之后。那种写法里，清理由 `wait_for_url` 的内部
+    //   `w.show()` 兜底，而两者都是「同步调 webview 线程」的调用；万一 show 卡住，
+    //   后面整段都到不了，超时守卫也守不住它前头的东西。
+    // - 放在 spawn 之后、等 URL 之前：此刻新端口刚定，上一代 cookie 已经确定作废，
+    //   而窗口还停在本地启动页 —— 没有任何请求会撞上 431，可以安心慢等。
+    //   清理与 dsh 启动**并行**，不占启动时间。
+    let purge_rx = {
+        let (tx, rx) = mpsc::channel();
+        let w = window.clone();
+        std::thread::spawn(move || {
+            match auth_cookie::purge_stale(&w) {
+                // 没什么可清是常态（刚清过整个目录后），别刷日志。
+                Ok(0) => {}
+                Ok(n) => log(&format!("auth cookie: purged {n} stale")),
+                Err(e) => log(&format!("auth cookie: purge skipped ({e})")),
+            }
+            let _ = tx.send(());
+        });
+        rx
+    };
+
     std::thread::spawn(move || {
         let mut child = child;
         match wait_for_url(&mut child, &window, err_tail) {
@@ -323,6 +352,15 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
                         std::thread::sleep(Duration::from_millis(120));
                         let _ = window.eval("window.__dshell&&window.__dshell.leave()");
                         std::thread::sleep(Duration::from_millis(470));
+                        // 清理是并行做的，这里只等它收尾。**带超时**：cookies() 是同步
+                        // 阻塞调用，卡住不该让界面永远到不了 dsh —— 那样比多攒一条 cookie
+                        // 严重得多。正常几毫秒，超时就照常导航。
+                        if purge_rx.recv_timeout(PURGE_TIMEOUT).is_err() {
+                            log(&format!(
+                                "auth cookie: purge exceeded {}s - navigating anyway",
+                                PURGE_TIMEOUT.as_secs()
+                            ));
+                        }
                         let w = window.clone();
                         let _ = w.navigate(parsed);
                         log("window navigated to dsh");

@@ -90,6 +90,22 @@ struct RegistryCache {
     versions: Vec<String>,
     /// 版本 → 命中的 dist-tag
     tags: BTreeMap<String, Vec<String>>,
+    /// 版本 → 发布时间（RFC3339）。降级要按它算 `--before`，见 `resolve_before`。
+    /// `serde(default)`：这个字段是后加的，老缓存文件里没有，不该因此整个失效。
+    #[serde(default)]
+    times: BTreeMap<String, String>,
+}
+
+impl Default for RegistryCache {
+    fn default() -> Self {
+        Self {
+            fetched_at_ms: 0,
+            registry: String::new(),
+            versions: Vec::new(),
+            tags: BTreeMap::new(),
+            times: BTreeMap::new(),
+        }
+    }
 }
 
 impl RegistryCache {
@@ -116,7 +132,11 @@ pub fn catalog(force: bool) -> Result<Catalog, String> {
     let cfg = Config::load();
     let path = Some(cfg.child_path_env());
 
-    let (reg, stale) = match if force { None } else { load_cache() } {
+    let (reg, stale) = match if force {
+        None
+    } else {
+        load_cache().filter(|c| !c.versions.is_empty())
+    } {
         Some(c) => {
             let stale = c.age_ms() >= TTL_MS;
             (c, stale)
@@ -172,6 +192,143 @@ pub fn catalog(force: bool) -> Result<Catalog, String> {
     })
 }
 
+/// 问问当前装的是哪个版本（本地命令，秒级）。
+///
+/// 切换前记一次，作为"装完起不来"时的回退目标（见 `main.rs` 的 `PREVIOUS_DSH`）。
+pub fn installed_version() -> Option<String> {
+    let cfg = Config::load();
+    npm(
+        &["ls", "-g", DSH_PACKAGE, "--depth=0", "--json"],
+        Some(cfg.child_path_env()),
+        LOCAL_TIMEOUT,
+    )
+    .ok()
+    .and_then(|s| parse_installed(&s))
+}
+
+/// 降级/重装旧版时要给 npm 的 `--before` 时刻；`None` = 不需要（目标就是最新的那一版）。
+///
+/// ## 为什么必须有这个东西
+///
+/// dsh 对同级的 `@deepseek-ai/*` 包用 `^` 范围引用，所以**直接装旧版会配到新版依赖**。
+/// 实测（2026-09-21）`0.1.6-alpha.1`：它的 core 要 `@deepseek-ai/dsh-app-boot` 导出
+/// `watchUserPatches`，而 npm 按 `^0.1.6-alpha.1` 取了最大值 alpha.2 —— 那份**删掉了**这个符号，
+/// 于是 `dsh web` 一启动就 `SyntaxError` 退出。`npm i -g @deepseek-ai/dsh@0.1.6-alpha.1`
+/// 报 `ok=true code=0`，装出来的却是一棵跑不起来的混合树。
+///
+/// `--before` 把 npm 的解析视野拉回"那个版本发布时"，就能装出**一致的旧树**（已实测：
+/// 装出 dsh-app-boot alpha.1、`dsh web` 正常打印地址、页面 200）。
+///
+/// ## 取哪个时刻：中点，不能取目标版本自己的发布时刻
+///
+/// 实测同一批包是**错峰发布**的：`0.1.6-alpha.1` 那波从 03:09Z 排到 04:17Z，**比 dsh 自己的
+/// 03:23Z 还晚**。所以取"目标版本自己的时刻"会 `ETARGET`（同级包那时还不存在）。
+/// 取**目标与下一个版本发布时间的中点**落在两个发布波之间 —— 实测有效（09-16T08:37 附近）。
+///
+/// 这是个启发式：它假定"同一批发布在同一时间窗内完成"。若仍有 `ETARGET`，
+/// `installer` 会把 npm 的原始错误翻译成一句能懂的话（见那边的 `ETARGET` 分支）。
+pub fn resolve_before(target: &str) -> Option<String> {
+    let times = match version_times() {
+        Ok(t) => t,
+        Err(e) => {
+            crate::log(&format!("update: could not read publish times ({e})"));
+            return None;
+        }
+    };
+    let Some(t0) = times.get(target) else {
+        crate::log(&format!("update: no publish time for {target} - installing without a window"));
+        return None;
+    };
+
+    // 按发布时间排序，取紧跟在 target 之后发布的那一版
+    let mut sorted: Vec<(&String, &String)> = times.iter().collect();
+    sorted.sort_by(|a, b| a.1.cmp(b.1));
+    let Some((next, t1)) = sorted.iter().find(|(_, t)| t.as_str() > t0.as_str()) else {
+        crate::log(&format!(
+            "update: {target} is the newest published version - no window needed"
+        ));
+        return None;
+    };
+
+    match midpoint(t0, t1) {
+        Ok(mid) => {
+            crate::log(&format!(
+                "update: window for {target}: {t0} .. {t1} (next={next}) -> --before={mid}"
+            ));
+            Some(mid)
+        }
+        Err(e) => {
+            crate::log(&format!("update: could not compute the window ({e})"));
+            None
+        }
+    }
+}
+
+/// 各版本的发布时间（走 registry 缓存；没有就查一次并合并进缓存）。
+fn version_times() -> Result<BTreeMap<String, String>, String> {
+    if let Some(c) = load_cache() {
+        if !c.times.is_empty() {
+            return Ok(c.times);
+        }
+    }
+
+    let cfg = Config::load();
+    let raw = npm(
+        &["view", DSH_PACKAGE, "time", "--json"],
+        Some(cfg.child_path_env()),
+        VIEW_TIMEOUT,
+    )?;
+    let times = parse_times(&raw).ok_or_else(|| "无法解析 npm view time 的输出".to_string())?;
+
+    // 合并进缓存（不动 versions / tags / registry 那些字段；没有缓存就只为它建一份）
+    let mut c = load_cache().unwrap_or_default();
+    c.times = times.clone();
+    save_cache(&c);
+    Ok(times)
+}
+
+/// `npm view <pkg> time --json` → 只留形如版本的键（`created` / `modified` 是元数据，
+/// 另外被撤回的版本可能不是时间戳字符串）。
+fn parse_times(s: &str) -> Option<BTreeMap<String, String>> {
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    let mut out = BTreeMap::new();
+    for (k, val) in v.as_object()? {
+        if Version::parse(k).is_err() {
+            continue;
+        }
+        let Some(t) = val.as_str() else { continue };
+        // RFC3339 粗校验：`2026-09-15T03:23:13.750Z`
+        if t.len() < 20 || !t.contains('T') || !t.ends_with('Z') {
+            continue;
+        }
+        out.insert(k.clone(), t.to_string());
+    }
+    Some(out)
+}
+
+/// 两个时刻的中点。
+///
+/// **交给 node 算**（而不是自己解析日期）：npm 本来就是 node，两者对日期字符串的理解天然一致；
+/// 引 `time` / `chrono` 只为一个减法不值当，手写历法换算更是这类项目里最典型的坑。
+fn midpoint(t0: &str, t1: &str) -> Result<String, String> {
+    const JS: &str = "const a=Date.parse(process.argv[1]),b=Date.parse(process.argv[2]);\
+                      if(!isFinite(a)||!isFinite(b)){process.exit(2)}\
+                      process.stdout.write(new Date((a+b)/2).toISOString());";
+    let node = Config::load()
+        .get("node")
+        .unwrap_or_else(|| std::path::PathBuf::from("node"));
+    let out = proc::run_path(&node, &["-e", JS, t0, t1], Duration::from_secs(15))
+        .map_err(|e| format!("无法执行 node：{e}"))?;
+    if !out.ok() {
+        return Err(out.diagnose());
+    }
+    let s = out.stdout.trim().to_string();
+    if s.is_empty() || !s.contains('T') {
+        return Err(format!("node 没有给出可用的时间：{s}"));
+    }
+    Ok(s)
+}
+
 /// 无视 TTL 重查 registry 并落盘（面板上的「刷新」、以及过期后的后台重查）。
 pub fn refresh_registry() -> Result<(), String> {
     let cfg = Config::load();
@@ -210,6 +367,8 @@ fn fetch_registry(path: &Option<String>) -> Result<RegistryCache, String> {
         registry,
         versions,
         tags,
+        // 发布时间是另一个 npm 查询（`view time`）的结果，别在这里把它抹掉
+        times: load_cache().map(|c| c.times).unwrap_or_default(),
     };
     save_cache(&cache);
     Ok(cache)

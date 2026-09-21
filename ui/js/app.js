@@ -17,11 +17,10 @@
  */
 
 import { STEP_IDS } from "./labels.js";
-import { stage, failEl, panel, logEl, stepsEl, btnInstall, btnQuit, skipEl } from "./dom.js";
-import { decode, tauri } from "./transport.js";
+import { stage, failEl, panel, logEl, stepsEl, btnInstall, btnBack, btnQuit, skipEl } from "./dom.js";import { decode, tauri } from "./transport.js";
 import { toast } from "./toast.js";
 import { ensureRow, renderStep } from "./steps.js";
-import { paint, installRunning, oneClick } from "./install.js";
+import { paint, installRunning, installPanelCancel, oneClick } from "./install.js";
 import { setDone } from "./state.js";
 
 /**
@@ -56,6 +55,7 @@ window.__dshell = {
     failEl.innerHTML = "";
     panel.hidden = true;
     logEl.textContent = "";
+    btnBack.hidden = true;
     document.querySelector("#inst-title").textContent = "正在安装";
     document.querySelector("#inst-pct").textContent = "";
     document.querySelector("#inst-elapsed").textContent = "";
@@ -63,15 +63,33 @@ window.__dshell = {
     STEP_IDS.forEach((id) => renderStep({ id: id, state: "pending", detail: "等待检查" }));
   },
   /** 切换 dsh 版本期间：这条时间线的语义不对（六行"等待检查"杵在安装面板上方），
-   *  收起来。装完由 Rust 再调一次 `updating(false)`。 */
+   *  收起来；同时把「一键安装」与「跳过检查」收走 —— 更新期间这两个动作要么无意义、
+   *  要么危险（点下去会在文件正被覆盖的中途去起 dsh）。装完由 Rust 调 `updating(false)`。 */
   updating(on) {
     stepsEl.hidden = !!on;
-    if (!on) skipEl.hidden = true;
+    btnInstall.hidden = !!on;
+    skipEl.hidden = true;
+    btnBack.hidden = true;
   },
   /** 更新失败且 dsh 已被停止：把「跳过检查，直接启动」这个出口露出来。
    *  它启动的是**当前已装**的版本 —— 失败后唯一的恢复路径。 */
   updateFailed() {
     skipEl.hidden = false;
+  },
+  /** 「装完 dsh 起不来」时的回退出口（Rust 只在记下了上一版时调用）。
+   *
+   *  这一步是必要的：上游用 `^` 范围引用同级包，**降级可能装出一个起不来的组合**
+   *  （实测 0.1.6-alpha.1：新版依赖删了个符号，旧核心配上去直接报 SyntaxError 退出）。
+   *  那时用户需要的是一个明确的回退目标，而不是自己去查 npm。 */
+  offerSwitchBack(b64version) {
+    const v = decode(b64version);
+    btnBack.hidden = false;
+    btnBack.disabled = false;
+    btnBack.textContent = "装回 " + v;
+    btnBack.onclick = () => {
+      btnBack.disabled = true;
+      tauri()?.core.invoke("app_switch_back");
+    };
   },
 };
 
@@ -107,6 +125,9 @@ async function wire() {
 
   await T.event.listen("install://done", (e) => {
     const p = e.payload || {};
+    // 收尾：停掉不确定进度条、禁用「取消」—— 安装已经结束，它们必须立刻停下来，
+    // 否则装完之后面板还在演"正在更新"，用户分不清到底跑完没有。
+    installPanelCancel(false);
     if (p.cancelled) {
       document.querySelector("#inst-title").textContent = "已取消";
     } else if (p.ok) {

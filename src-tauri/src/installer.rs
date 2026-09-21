@@ -60,7 +60,7 @@ pub struct Outcome {
 /// `Kind::Dsh` 装的包，也是版本查询用的包名（`update.rs` 共用这一个来源）。
 pub const DSH_PACKAGE: &str = "@deepseek-ai/dsh";
 
-fn command_for(kind: Kind, target: Option<&str>) -> (String, Vec<String>) {
+fn command_for(kind: Kind, target: Option<&str>, resolve_before: Option<&str>) -> (String, Vec<String>) {
     match kind {
         Kind::Node => (
             "winget".to_string(),
@@ -83,16 +83,36 @@ fn command_for(kind: Kind, target: Option<&str>) -> (String, Vec<String>) {
                 Some(v) => format!("{DSH_PACKAGE}@{v}"),
                 None => DSH_PACKAGE.to_string(),
             };
-            (
-                "cmd".to_string(),
-                ["/c", "npm", "i", "-g"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .chain(std::iter::once(spec))
-                    .collect(),
-            )
+            // `--no-audit --no-fund`：省掉两次与安装无关的网络往返。
+            //
+            // `--loglevel=http`：**这条是为了让用户看得见动静**。真装的时候 npm 默认
+            // 只吐 warnings 和最后那行 "added N packages … in 2m"，中间一两分钟一声不吭
+            // （实测 2026-09-21：升级要动 430+ 个包）——面板上只有一个不确定进度条在转，
+            // 看着像卡死。http 级会逐条打出 `npm http cache/fetch … 12ms`，
+            // 代价是几百行噪声（面板只显示尾部 60 行，且不进日志文件）。
+            let mut args: Vec<String> = ["/c", "npm", "i", "-g", "--no-audit", "--no-fund", "--loglevel=http"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            // 装"不是最新那一版"时必须把 npm 的解析视野拉回那个版本发布时，
+            // 否则 `^` 范围会配上新版同级包，装出一棵跑不起来的树（见 `update::resolve_before`）。
+            if let Some(b) = resolve_before {
+                args.push(format!("--before={b}"));
+            }
+            args.push(spec);
+            ("cmd".to_string(), args)
         }
     }
+}
+
+/// 给面板日志看的命令行（`cmd /c` 的 `/c` 是纯噪声，去掉）。
+fn display_command(program: &str, args: &[String]) -> String {
+    let body = if program == "cmd" && args.first().map(String::as_str) == Some("/c") {
+        args[1..].join(" ")
+    } else {
+        args.join(" ")
+    };
+    format!("{program} {body}")
 }
 
 /// 版本号字符集白名单：`0-9 A-Za-z . - +`。
@@ -110,7 +130,15 @@ fn valid_version(v: &str) -> bool {
 /// 安装命令是长跑，必须能取消（npm 会拉起一堆子进程，`/T` 一起收）。
 ///
 /// `target` = 要装的指定版本（`None` = 装/升级到默认 dist-tag，即「一键安装」的行为）。
-pub fn run(app: &AppHandle, kind: Kind, state: &AppState, target: Option<&str>) -> Outcome {
+/// `resolve_before` = 给 npm 的 `--before` 时刻：装"不是最新那一版"时必须把解析视野
+/// 拉回那个版本发布时，否则 `^` 范围会配上新版同级包（见 `update::resolve_before`）。
+pub fn run(
+    app: &AppHandle,
+    kind: Kind,
+    state: &AppState,
+    target: Option<&str>,
+    resolve_before: Option<&str>,
+) -> Outcome {
     if let Some(v) = target {
         if !valid_version(v) {
             crate::log(&format!(
@@ -126,7 +154,7 @@ pub fn run(app: &AppHandle, kind: Kind, state: &AppState, target: Option<&str>) 
     }
 
     let cfg = Config::load();
-    let (program, args) = command_for(kind, target);
+    let (program, args) = command_for(kind, target, resolve_before);
     let path_env = cfg.child_path_env();
 
     // 带目标版本 = 用户明确指了要装哪个（版本页的切换），此时"更新"比"安装"准。
@@ -136,9 +164,25 @@ pub fn run(app: &AppHandle, kind: Kind, state: &AppState, target: Option<&str>) 
         None => kind.title().to_string(),
     };
 
+    if let Some(b) = resolve_before {
+        crate::log(&format!("install {}: resolving as of {b}", kind.id()));
+    }
+
     let log: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::with_capacity(220)));
     let percent: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
     let phase: Arc<Mutex<String>> = Arc::new(Mutex::new(format!("{verb} {what}")));
+
+    // t=0 就往日志里放点东西：面板一出现就有内容，而不是一片空白等 npm 开口。
+    // 第二行是**预期管理**：npm 解析依赖时会安静一两分钟，不写出来用户会以为卡死。
+    {
+        let mut l = log.lock().unwrap();
+        l.push_back(format!("$ {}", display_command(&program, &args)));
+        if matches!(kind, Kind::Dsh) {
+            l.push_back(
+                "（换版本要重装几百个包；npm 在解析依赖时会安静一会儿，通常 1-3 分钟）".to_string(),
+            );
+        }
+    }
     let started = Instant::now();
     let done = Arc::new(AtomicBool::new(false));
 
@@ -180,7 +224,9 @@ pub fn run(app: &AppHandle, kind: Kind, state: &AppState, target: Option<&str>) 
                     if line.is_err { "!" } else { " " },
                     line.text
                 ));
-                while l.len() > 200 {
+                // 上限 120：面板只显示尾部 60 行，而 `--loglevel=http` 会刷几百行 ——
+                // 上限越大队列序列化进事件的 JSON 越大（每 120ms 一次）。
+                while l.len() > 120 {
                     l.pop_front();
                 }
             }
@@ -259,7 +305,18 @@ pub fn run(app: &AppHandle, kind: Kind, state: &AppState, target: Option<&str>) 
             .rev()
             .collect::<Vec<_>>()
             .join("\n");
-        Some(format!("安装失败（退出码 {:?}）\n{tail}", code))
+        // `ETARGET` 是"按发布时间窗装旧版"最常见也最难懂的失败：npm 只说
+        // "No matching version found for … with a date before …"，用户看不出跟版本管理有关。
+        // 翻译成一句能懂的话（原始输出仍然附在后面，不藏证据）。
+        let head = if tail.contains("ETARGET") {
+            concat!(
+                "这个版本装不了：它发布那一刻，同一批的其它包还没发全（npm ETARGET）。\n",
+                "— 换一个版本，或点下面的「装回 …」。\n"
+            )
+        } else {
+            ""
+        };
+        Some(format!("{head}安装失败（退出码 {:?}）\n{tail}", code))
     };
 
     crate::log(&format!(
@@ -297,6 +354,11 @@ fn emit(
 
 /// 从一行里抠百分比：先找 `NN%`，找不到再数进度条的方块（winget 两种都会用）。
 fn parse_percent(s: &str) -> Option<f64> {
+    // `--loglevel=http` 的行里全是 URL，而 URL 里可能有百分号转义
+    // （`1.2.3%2Bbuild` 那种），被当成百分比会让进度条乱跳。带 `://` 的行直接不看。
+    if s.contains("://") {
+        return None;
+    }
     let b = s.as_bytes();
     let mut best = None;
     for i in 0..b.len() {
@@ -329,6 +391,14 @@ fn parse_percent(s: &str) -> Option<f64> {
 
 fn guess_phase(line: &str) -> Option<String> {
     let l = line.to_ascii_lowercase();
+    // `--loglevel=http` 的流水：fetch 是真的在下载，cache 只是读元数据缓存
+    if l.starts_with("npm http") {
+        return Some(if l.contains(" fetch ") {
+            "正在下载".into()
+        } else {
+            "正在解析依赖".into()
+        });
+    }
     if l.contains("downloading") || l.contains("download") {
         Some("正在下载".into())
     } else if l.contains("installing") || l.contains("install") {

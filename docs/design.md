@@ -170,3 +170,94 @@ R18 那次为什么得出相反结论：它的判据是"探针用 `sendBeacon` �
 实测（2026-09-21）：冷启动 5 条 npm → 落盘 639 字节；TTL 内只剩 2 条本地命令、**零联网**；
 过期（回填 3 小时时间戳）则是"先推旧数据 → 后台重查 → 再推一份覆盖"，两段都不让用户干等。
 
+## npm 装包时的"静默一分钟"：为什么要 `--loglevel=http`
+
+真机上从 `0.1.5-rc.2` 切到 `0.1.6-alpha.2` 要动 430+ 个包、约两分钟。这两分钟里，
+**npm 默认什么都不说**：只在开头吐几条 deprecation warning，结尾吐一行
+`added 58 packages, removed 90 packages, and changed 430 packages in 2m`。
+面板上只剩一个不确定进度条在转，看着像卡死（用户 2026-09-21 的原话："只能看进度条在刷动画"）。
+
+实测对照（`npm i -g @deepseek-ai/dsh@0.1.6-alpha.2 --dry-run`，同机同缓存）：
+
+| loglevel | stderr 行数 | stdout 行数 | 内容 |
+| --- | --- | --- | --- |
+| `notice`（默认） | **0** | 490（`--dry-run` 专有的 `change pkg a => b` 列表；真装时没有） | 只有 warnings 与结尾汇总 |
+| `http` | **564**（`cache hit` 564 / `cache miss` 0） | 490 | 逐条 `npm http cache/fetch … 12ms` |
+
+所以安装命令加 `--loglevel=http`（外加 `--no-audit --no-fund` 省两次与安装无关的网络往返），
+让面板有连续的流水可看。代价是几百行噪声 —— 面板只显示尾部 60 行，且这些行**不进日志文件**
+（`installer` 的回调只推事件、不落盘），所以 `dshell-poc.log` 不会被刷爆。
+
+顺带一条：`parse_percent` 必须**跳过含 `://` 的行**。http 流水里全是 URL，而 URL 里的
+`%2B` / `%2f` 转义一旦被当百分比解析，进度条会乱跳。
+
+## 换版本时的磁盘写突峰会把整台机器拖死（2026-09-21 实测）
+
+一次真机事故与它的取证。用户降级 dsh 到 `0.1.5-rc.2` 时**整个系统死机**，硬复位重启
+（`System` 日志 `Kernel-Power 41`，13:58:02）。日志里那次安装只有
+`install dsh: spawned cmd (pid 23864)`，**没有 ok 行、也没有任何退出行** —— 进程是被硬复位带走的。
+
+**结论：不是降级逻辑的问题**（同一次会话里，这个降级与随后的升级都成功跑完了）。
+环境数据指向磁盘：
+
+| 项 | 值 |
+| --- | --- |
+| C 盘 | 237 GB 总 / **12 GB 可用（95% 已用）** |
+| C 盘硬件 | INTEL SSDPEKKW256G8 **SSD**（256 G NVMe，老型号） |
+| **npm 缓存** | **14.93 GB / 61963 个文件**，就在 C 盘 |
+| `%TEMP%` | 1.65 GB |
+| dsh 安装树 | 0.55 GB |
+| 近 30 天 `Kernel-Power 41` | **1 次**（就这次，不是复发性硬件故障） |
+| 内存 | 48 GB（38 GB 空闲）→ 排除内存/页面文件 |
+
+机制：换版本要一次性重装 400+ 个包（几千个文件），npm 先往已经 15 G 的缓存里写新内容。
+**接近写满的 SSD 没有预留空间做 GC/磨损均衡，写入突峰会掉到很低甚至卡住**；系统盘一卡，
+整机就"死机"。这也解释了为什么同样 440 个包，上一次升级没事、这一次死了 —— 满盘 SSD 的表现
+本来就是忽好忽坏的。
+
+**因此加的两样东西**（不是治本，是把"事后解释"变成"事前提醒"）：
+
+1. `win32::free_space_bytes`（`GetDiskFreeSpaceExW`，跟 `win32.rs` 现有的手写绑定一路，
+   不引 `windows-sys`），台账里带上 `disk_free_gb`。
+2. 面板在切换确认框里按 `free < 20 GB` 给一句警告 + 具体出路（清缓存 / 把缓存挪到别的盘）。
+   实测：日志 `catalog ok (… disk_free=11.8GB)`，与 PowerShell 报的 12 GB 一致。
+
+**给用户的治本动作**（记在这里，因为它会再犯）：`npm cache clean --force`（回收约 15 G）；
+或 `npm config set cache D:\npm-cache` 把缓存挪到 2 T 机械盘、顺便把写入负载从系统 SSD 移走。
+系统盘仍在 90%+ 时，同类卡顿还会再来。
+
+
+## 降级为什么要带"发布时间窗"（npm `--before`）
+
+dsh 对同级的 `@deepseek-ai/*` 包用 `^` 范围引用，所以**朴素地装旧版会配到新版依赖**：
+
+```
+npm i -g @deepseek-ai/dsh@0.1.6-alpha.1     # 报 ok=true code=0，装出来却是混合树
+→ dsh web 启动即退出：SyntaxError: The requested module '@deepseek-ai/dsh-app-boot'
+  does not provide an export named 'watchUserPatches'
+```
+
+（alpha.1 的 core 需要这个符号；npm 按 `^0.1.6-alpha.1` 取了最大值 alpha.2，而 alpha.2 把它删了。）
+
+解法是 `--before`：把 npm 的解析视野拉回"那个版本发布时"，装出**一致的旧树**。已实测：
+装出 `dsh-app-boot` alpha.1（符号在）→ `dsh web` 打印 token URL → 带 cookie 请求 200
++ `<title>DeepSeek Harness</title>`。
+
+**取哪个时刻是关键**：不能取目标版本自己的发布时刻。这批包是**错峰发布**的：
+
+| 版本 | dsh 自己 | 同级包 | 结论 |
+| --- | --- | --- | --- |
+| `0.1.6-alpha.1` | `09-15T03:23Z` | `03:09Z` … **`04:17Z`** | 同一批比 dsh 自己还晚 54 分钟 → 取自身时刻会 `ETARGET` |
+| `0.1.6-alpha.2` | `09-17T13:52Z` | `13:38Z` 起 | 与上一波隔了两天 |
+
+所以取**目标与下一个版本发布时间的中点**（本次 ≈ `09-16T08:37Z`），它落在两个发布波之间。
+实现上这个减法**交给 node 算**（`node -e "new Date((Date.parse(a)+Date.parse(b))/2)"`）：
+npm 本身是 node，两边对日期字符串的理解天然一致；为一个减法引 `time`/`chrono` 不值当，
+手写历法换算更是这类项目里最典型的坑。目标就是**最新那一版**时不存在"下一个版本"，自然不需要窗口。
+
+**已知局限**：这是启发式（假定同一批发布在同一窗口内完成）。真撞上 `ETARGET` 时，
+`installer` 会把 npm 的原始错误翻译成"该版本发布时同批的包还没发全"，
+并保留原始输出 —— 失败卡片上仍有「装回上一个版本」的出口。
+
+
+

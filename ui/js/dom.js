@@ -14,6 +14,8 @@ export const panel = $("#install");
 export const barEl = $("#inst-bar");
 export const logEl = $("#inst-log");
 export const btnInstall = $("#btn-install");
+/** 失败卡片上的「装回 <上一版>」：只在"装完 dsh 起不来"且有回退目标时出现。 */
+export const btnBack = $("#btn-back");
 export const btnQuit = $("#btn-quit");
 export const skipEl = $("#skip");
 export const toastEl = $("#toast");

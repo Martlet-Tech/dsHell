@@ -471,17 +471,24 @@ fn push_data(app: &AppHandle) -> bool {
         "version": app.package_info().version.to_string(),
         "dsh_path": cfg.dsh.clone(),
         "selected": selected(),
+        "disk": disk_info(),
     });
     match update::catalog(false) {
         Ok(catalog) => {
             crate::log(&format!(
-                "settings: catalog ok (current={:?}, latest={:?}, {} 个版本, npm_global={}, age={}s, stale={})",
+                "settings: catalog ok (current={:?}, latest={:?}, {} 个版本, npm_global={}, age={}s, stale={}, disk_free={}GB)",
                 catalog.current,
                 catalog.latest,
                 catalog.versions.len(),
                 catalog.npm_global,
                 catalog.registry_age_secs.unwrap_or(0),
-                catalog.registry_stale
+                catalog.registry_stale,
+                about
+                    .get("disk")
+                    .and_then(|d| d.get("free_gb"))
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string())
             ));
             let stale = catalog.registry_stale;
             push(app, json!({ "type": "data", "about": about, "catalog": catalog }));
@@ -507,6 +514,20 @@ fn push(app: &AppHandle, msg: serde_json::Value) {
 
 fn selected() -> Option<String> {
     SELECTED.lock().ok()?.clone()
+}
+
+/// 系统盘（npm 缓存所在卷）的空间，给面板在切换前给一句警告用。
+///
+/// 2026-09-21 实测踩过一次：换版本要一次性重装 400+ 个包，而系统盘只剩 12G（已用 95%）、
+/// npm 缓存自己就 15G —— 那次降级的写入高峰把整台机器拖死（Kernel-Power 41 异常关机）。
+/// 面板据此提醒"先清理"，比事后解释便宜得多。
+fn disk_info() -> serde_json::Value {
+    // npm 缓存默认在 %LOCALAPPDATA%\npm-cache，所以问这个盘
+    let probe = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\".to_string());
+    match crate::win32::free_space_bytes(&probe) {
+        Some(free) => json!({ "free_gb": (free as f64 / 1073741824.0 * 10.0).round() / 10.0 }),
+        None => json!({}),
+    }
 }
 
 fn set_selected(v: Option<String>) {

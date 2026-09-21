@@ -261,6 +261,39 @@ fn run_doctor(app: &AppHandle, window: &WebviewWindow, then_handoff: bool) {
 
 // ───────────────────────────── handoff ─────────────────────────────
 
+/// 切换前那一版的版本号。
+///
+/// 用途只有一个：**"装完 dsh 起不来"时的回退目标**。2026-09-21 实测踩到过 ——
+/// 降级到 `0.1.6-alpha.1` 后 dsh 报 `does not provide an export named 'watchUserPatches'`
+/// 直接退出（上游用 `^` 范围引用同级包，新版删了个符号，旧核心就配上了不兼容的依赖）。
+/// 那种情况下用户需要的是一个明确的回退出口，而不是自己去查 npm。
+static PREVIOUS_DSH: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_previous_dsh(v: Option<String>) {
+    if let Ok(mut p) = PREVIOUS_DSH.lock() {
+        *p = v;
+    }
+}
+
+fn previous_dsh() -> Option<String> {
+    PREVIOUS_DSH.lock().ok()?.clone()
+}
+
+/// 失败卡片上的「装回 <上一版>」出口。
+///
+/// **只在确实记下了上一版时出现**（否则按钮没有目标）。刻意**不自动回滚**：
+/// 自动回滚会掩盖"新版不能用"这个事实，与 09 定下的取消语义同一个理由。
+fn offer_switch_back(window: &WebviewWindow) {
+    let Some(v) = previous_dsh() else {
+        return;
+    };
+    log(&format!("switch: offering rollback to {v}"));
+    let _ = window.eval(&format!(
+        "window.__dshell&&window.__dshell.offerSwitchBack('{}')",
+        b64(&v)
+    ));
+}
+
 /// 起 dsh 并把窗口导航到它。
 ///
 /// **可重入**：重启走的也是这条路径（先 `stop_dsh`，再调它）。所以这里不再
@@ -399,6 +432,8 @@ fn start_handoff(app: AppHandle, window: WebviewWindow) {
                     doctor::launch_step(StepState::Failed, "dsh 没有正常启动"),
                 );
                 splash_fail(&window, &e);
+                // 装完起不来是"刚切换过版本"最可能的结果之一，给一个回退出口。
+                offer_switch_back(&window);
                 // 窗口留着：release 没有控制台，失败卡片是用户唯一的线索
             }
         }
@@ -629,6 +664,22 @@ fn do_switch_dsh(app: &AppHandle, target: &str) {
         return;
     };
 
+    // 记下"切换前那一版"：装完 dsh 起不来时，它是唯一已知的回退目标。
+    set_previous_dsh(update::installed_version());
+
+    // 装"不是最新那一版"时要算 `--before`（把 npm 的解析视野拉回该版本发布时，
+    // 否则 `^` 范围会配上新版同级包，装出一棵起不来的树 —— 见 `update::resolve_before`）。
+    // **跟停 dsh 并行**：这一步可能要查一次 npm（首次），而停 dsh 本来就要几秒，
+    // 并行之后用户完全感觉不到。
+    let window_rx = {
+        let target = target.to_string();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(update::resolve_before(&target));
+        });
+        rx
+    };
+
     settings::hide(app);
     app.state::<AppState>()
         .restart_guard
@@ -674,8 +725,18 @@ fn do_switch_dsh(app: &AppHandle, target: &str) {
 
     let outcome = {
         let state = app.state::<AppState>();
-        installer::run(app, installer::Kind::Dsh, &state, Some(target))
+        // 等窗口算完（多半已经好了：它是跟停 dsh 并行跑的）
+        let before = window_rx
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap_or(None);
+        installer::run(app, installer::Kind::Dsh, &state, Some(target), before.as_deref())
     };
+
+    // **必须发这个事件**：面板的标题、进度条动画、取消按钮都由它收尾。
+    // 少了它，装完之后面板会一直停在"正在更新"、进度条继续转 —— 用户看到
+    // doctor 已经在跑、dsh 已经起来，会以为"更新没跑完就开始启动了"
+    // （2026-09-21 实测踩到）。
+    emit_install_done(app, installer::Kind::Dsh, &outcome);
 
     // 无论成败都要放行体检通道，否则失败卡片上的出口会变成死按钮。
     app.state::<AppState>()
@@ -925,9 +986,35 @@ async fn doctor_set_path(app: AppHandle, id: String, path: String) -> Result<doc
     .map_err(|e| e.to_string())?
 }
 
+/// 安装 / 更新的统一收尾事件。
+///
+/// 面板的标题（"安装完成，正在复检…" / "安装失败"）、进度条动画、取消按钮都由它复位。
+/// 两个调用点（`install_missing` 的补齐队列、`do_switch_dsh` 的版本切换）**必须发同一个形状**
+/// —— 少了它，面板会永远停在"正在更新"、进度条一直转，用户会以为更新还没跑完
+/// （2026-09-21 实测）。
+fn emit_install_done(app: &AppHandle, kind: installer::Kind, outcome: &installer::Outcome) {
+    let _ = app.emit(
+        "install://done",
+        serde_json::json!({
+            "kind": kind.id(),
+            "ok": outcome.ok,
+            "cancelled": outcome.cancelled,
+            "error": outcome.error,
+        }),
+    );
+}
+
 /// 「一键安装」：队列在 Rust 侧决定（只装官方通道的 node / dsh），前端不参与。
 #[tauri::command]
 async fn install_missing(app: AppHandle) -> Result<(), String> {
+    // **第二个门也要堵上**：重启/切换期间启动页上的按钮本该被收起来，但万一用户
+    // 点到了（旧状态残留、键盘回车…），这条链会跑 doctor → handoff → 在
+    // **文件正被 npm 覆盖的中途**拉起第二个 dsh 后端。`doctor_run` 已经这么挡了，
+    // 这里同样挡（见 `restart_guard` 的说明）。
+    if app.state::<AppState>().restart_guard.load(Ordering::SeqCst) {
+        log("install: suppressed (a restart/switch is in progress)");
+        return Ok(());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let mut cfg = Config::load();
         let steps = doctor::run_all(&app, &cfg);
@@ -951,18 +1038,10 @@ async fn install_missing(app: AppHandle) -> Result<(), String> {
         for kind in queue {
             let outcome = {
                 let state = app.state::<AppState>();
-                // `None` = 装默认 dist-tag（"补齐"语义）。带版本号的更新走 `do_switch_dsh`。
-                installer::run(&app, kind, &state, None)
+                // `None`/`None` = 装默认 dist-tag（"补齐"语义），不需要时间窗。
+                installer::run(&app, kind, &state, None, None)
             };
-            let _ = app.emit(
-                "install://done",
-                serde_json::json!({
-                    "kind": kind.id(),
-                    "ok": outcome.ok,
-                    "cancelled": outcome.cancelled,
-                    "error": outcome.error,
-                }),
-            );
+            emit_install_done(&app, kind, &outcome);
 
             cfg = Config::load();
             if !outcome.ok {
@@ -996,8 +1075,7 @@ async fn install_missing(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn install_cancel(app: AppHandle) {
-    let state = app.state::<AppState>();
+fn install_cancel(app: AppHandle) {    let state = app.state::<AppState>();
     state.cancel.request();
     let pid = state.install_pid.load(Ordering::SeqCst);
     log(&format!("install: cancel requested (pid {pid})"));
@@ -1008,8 +1086,7 @@ fn install_cancel(app: AppHandle) {
 
 /// 逃生口：不体检直接启动（页面角落里那个低调的链接）。
 #[tauri::command]
-async fn app_skip_doctor(app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
+async fn app_skip_doctor(app: AppHandle) -> Result<(), String> {    tauri::async_runtime::spawn_blocking(move || {
         if let Some(w) = app.get_webview_window("main") {
             start_handoff(app.clone(), w);
         }
@@ -1022,6 +1099,19 @@ async fn app_skip_doctor(app: AppHandle) -> Result<(), String> {
 fn app_quit(app: AppHandle) {
     log("user requested quit");
     app.exit(0);
+}
+
+/// 失败卡片上的「装回 <上一版>」：把切换前那一版装回来。
+///
+/// 这是"新版装完 dsh 起不来"这个死胡同的出口。不自动执行 —— 用户点才走。
+#[tauri::command]
+fn app_switch_back(app: AppHandle) {
+    let Some(target) = previous_dsh() else {
+        log("switch-back: no previous version was recorded - ignoring");
+        return;
+    };
+    log(&format!("switch-back: requested -> {target}"));
+    start_switch_dsh(&app, target);
 }
 
 // ───────────────────────────── main ─────────────────────────────
@@ -1059,6 +1149,7 @@ fn main() {
             install_missing,
             install_cancel,
             app_skip_doctor,
+            app_switch_back,
             app_quit
         ])
         .setup(move |app| {

@@ -206,7 +206,7 @@ Rust ──eval/postMessage──▶ 面板 JS（tauri.localhost/settings.html�
 | D1 | 底部「取消 / 确定」的语义 | ✅ **两个按钮都关闭设置页并把 dsh 页面切回前台**；「取消」= 放弃这次的选择（清掉），「确定」= 保留选择（下次打开仍是它）。本轮两个标签都没有别的可落盘字段 —— 不为它发明假功能 |
 | D2 | 托盘要不要一个直达「更新 dsh」 | ✅ **不要**，托盘只加一项「设置」 |
 | D3 | 开源清单 A 还是 B | ✅ **暂时不做，占个位置**（关于页放一个说明块，等验证通过再补） |
-| D4 | 本轮 DShell 版本号 | ✅ 验证通过后升到 **0.1.5**（实施期间不动，保持 0.1.4） |
+| D4 | 本轮 DShell 版本号 | ✅ 升到 **0.1.5**（`Cargo.toml` 与 `tauri.conf.json` 一致，已随 `67d381f` 提交） |
 | D5 | 标签栏位置 | ✅ 顶部横排（取代原 260901 文档的左右分栏设想） |
 
 
@@ -342,12 +342,34 @@ fn do_switch_dsh(app: &AppHandle, target: &str) {
 ### `installer` 的改造点（唯一一处对外行为变化）
 
 ```rust
-fn command_for(kind: Kind, target: Option<&str>) -> (String, Vec<String>);
-//   Kind::Dsh + None        → npm i -g @deepseek-ai/dsh          （现状，一键安装用）
-//   Kind::Dsh + Some("x.y") → npm i -g @deepseek-ai/dsh@x.y
-pub fn run(app: &AppHandle, kind: Kind, state: &AppState, target: Option<&str>) -> Outcome;
-// 既有调用点（install_missing）传 None ⇒ 行为不变。
+fn command_for(kind: Kind, target: Option<&str>, resolve_before: Option<&str>) -> (String, Vec<String>);
+//   Kind::Node                  → winget install --id OpenJS.NodeJS.LTS …
+//   Kind::Dsh + None            → npm i -g --no-audit --no-fund --loglevel=http @deepseek-ai/dsh
+//   Kind::Dsh + Some("x.y")     → 同上，末尾是 @deepseek-ai/dsh@x.y
+//   Kind::Dsh + resolve_before  → 再插一个 --before=<时刻>（装"不是最新那一版"时必须，见 ③）
+//   （`--loglevel=http` 是为了让面板看得见动静，理由见 ③）
+pub fn run(
+    app: &AppHandle, kind: Kind, state: &AppState,
+    target: Option<&str>, resolve_before: Option<&str>,
+) -> Outcome;
+// 既有调用点（install_missing）传 None, None ⇒ 行为不变，只是输出更啰嗦、少两次网络往返。
 ```
+
+### 发布时间窗（`update.rs`）
+
+```rust
+/// 降级/重装旧版时要给 npm 的 `--before`；None = 目标就是最新那版（不需要）。
+pub fn resolve_before(target: &str) -> Option<String>;
+//   内部：version_times()（`npm view <pkg> time --json`，合并进同一个 registry 缓存）
+//        → 按发布时间排序取"紧跟在 target 之后发布的那一版"
+//        → midpoint(t0, t1)
+//   取中点、不取 target 自己的时刻，理由与实测见 ③（错峰发布）。
+```
+
+- `midpoint` 交给 **node** 算（`node -e "new Date((Date.parse(t0)+Date.parse(t1))/2)"`）：
+  npm 本身是 node，两边对日期字符串的理解天然一致；为一个减法引 `time`/`chrono` 不值当，
+  手写历法换算更是典型坑。
+- 窗口计算与 `stop_dsh` **并行**（`mpsc`），首次那一次查询（约 1-2s）被停 dsh 的时间盖住。
 
 ### 托盘与文案
 
@@ -366,7 +388,6 @@ enum TrayAction { RestoreWindow, OpenInBrowser, RestartDsh, OpenSettings, Quit }
 | `ui/js/settings.js` | 标签注册表（`{id, title, render, onOk, onCancel}`）+ 两个标签 + 底栏状态机 + 与宿主/桥接通信 |
 | `ui/credits.json` | 开源清单产物（D3 选 B 时才有），由脚本生成后**提交进仓库** |
 | `scripts/gen-credits.py` | 从 `Cargo.lock` + 本机 cargo registry 抽 `name/version/license`（只读，幂等） |
-
 ### 涉及文件（改动清单）
 
 | 文件 | 改动 |
@@ -417,20 +438,24 @@ enum TrayAction { RestoreWindow, OpenInBrowser, RestartDsh, OpenSettings, Quit }
 | 头一轮测试用的不是最新产物 | 用户跑的是 `20260921-114105`，比 `114446` 少两行日志（`bridge path` / `catalog ok`），所以那几轮看不到台账行。**两版行为完全相同、只差日志**（已用二进制字符串核对：`catalog ok` 只在 114446 里）。 |
 | 「确定」在未选中时 | 日志出现 `applied (selection=None)`：没选任何版本时点确定 = 清空选择并关闭。符合 D1（确定=保留选择），不是缺陷。 |
 
-### 遗留项
+### 第二轮真实使用暴露的问题与修法（2026-09-21，产物 `20260921-123041`）
 
-1. ~~**每开一次面板跑 5 条 npm 命令**~~ → **已做**（2026-09-21）：registry 那半边 2 小时磁盘缓存 +
-   "先用上次结果渲染、过期再后台重查"。实测三种状态见下表。**代价**：过期那次会多跑一遍本地命令
-   （先推旧数据、后台重查后再推一份时，`current` 重新现查一次），约 1 秒，只发生在过期路径上。
-2. `shutting down: killing the dsh process tree (pid N)` 打印**两次**：既有代码里
-   `RunEvent::ExitRequested` 与 `RunEvent::Exit` 被同一个分支匹配，清理跑两遍。
-   无害（第二次是 kill 一个已死的 pid），**非本项引入**（`git diff` 未触及那段）。
-   理论隐患：pid 在两遍之间被系统回收给别的进程时会误杀（概率极低）。
-   修法两行（kill 完把 pid 清零），**待拍板**。
-3. **还没人工验收**：降级警告（T9）、同版本重装（T10）、更新失败后的出口（T11）、
-   来源伪装拒绝（T12）、关于页与开源清单占位（D3 → 本轮明确只占位）。
+用户在真机上从 `0.1.5-rc.2` 切到 `0.1.6-alpha.2`（约 2 分钟），提了三点不适：
+
+| # | 现象 | 定性 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 开头一分多钟只有不确定进度条在转，日志区**空白** | **npm 的行为**，不是卡死：真装时默认只吐 warnings + 最后一行 `added N packages … in 2m` 汇总。实测 dry-run：notice 级 stderr **0 行**；`--loglevel=http` 有 **564 行**带耗时的 http 流水 | ① dsh 安装命令加 `--no-audit --no-fund --loglevel=http`（省两次与安装无关的网络往返 + 让 npm 真的吐流水）；② `installer` 起跑就先写两行日志：要跑的命令 + "npm 在解析依赖时会安静一会儿，通常 1-3 分钟"；③ `guess_phase` 认 `npm http` → "正在解析依赖 / 正在下载" |
+| 2 | "更新没跑完，那边开始启动了" | **观感 bug（真 bug）**：切换路径**没发 `install://done`**，于是面板标题永远停在"正在更新"、进度条一直转、取消按钮一直可点。日志证明顺序其实是对的（`install dsh: ok=true` 在 `spawned dsh web` **之前**） | 抽出 `emit_install_done()`：补齐队列与切换路径共用同一个事件形状；启动页在 `install://done` 里调 `installPanelCancel(false)`，停掉不确定动画、禁用取消 |
+| 3 | 更新期间「一键安装」还挂在那儿（**可点**） | **第二个门**：`install_missing` 不检查 `restart_guard`，点下去会跑 doctor → handoff → 在**文件正被 npm 覆盖的中途**起第二个 dsh 后端 | ① `updating(true)` 把「一键安装」「跳过检查」都收走；② `install_missing` 自己也挡一道（与 `doctor_run` 同法） |
+
+顺带在 `parse_percent` 里加了一条：**带 `://` 的行不参与百分比解析** —— http 流水里的 `%2B`
+之类转义会被误判成百分比，让进度条乱跳。
+
+日志上限也从 200 行下调到 120 行（面板只显示尾部 60 行，而 http 级会刷几百行，队列越大
+序列化进事件的 JSON 越大）。
 
 ### 缓存实测（2026-09-21，产物 `target\20260921-123041`）
+
 
 | 状态 | npm 调用 | 日志证据 |
 | --- | --- | --- |
@@ -443,4 +468,106 @@ enum TrayAction { RestoreWindow, OpenInBrowser, RestartDsh, OpenSettings, Quit }
 
 > 面板上会显示 `· 数据 N 分钟前`，过期时补 `（正在刷新…）` —— 用户有权知道眼前这份列表有多旧。
 
+### 第三轮真实使用：降级把 dsh 装坏了（2026-09-21，产物 `20260921-125429`）
+
+用户从 `0.1.6-alpha.2` **降级到 `0.1.6-alpha.1`**，`npm i -g` 报 `ok=true code=0`，但 dsh 一启动就退出：
+
+```
+SyntaxError: The requested module '@deepseek-ai/dsh-app-boot' does not provide an export
+named 'watchUserPatches'
+    at runCli (…/npm/node_modules/@deepseek-ai/dsh/lib/bin.js:145)
+```
+
+**根因（实测取证，不是猜）**：
+
+| 事实 | 证据 |
+| --- | --- |
+| `dsh@0.1.6-alpha.1` 的 core 需要 `dsh-app-boot` 导出 `watchUserPatches` | 它的 `lib/profile-boot-CuwbWsnH.js` 里出现 3 次（`bin.js` → 85 字节的 `DB8eVKBx` → 它） |
+| 装上去的 `dsh-app-boot` 是 **0.1.6-alpha.2**，里面**没有**这个符号 | 对安装目录全量 grep：0 命中 |
+| `dsh-app-boot@0.1.6-alpha.1` **有**这个符号 | `npm pack` 下载该版本后 grep：2 命中 |
+| 为什么配到了 alpha.2 | `dsh` 对同级包用 `^` 范围（如 `@deepseek-ai/dsh-acp-app: ^0.1.6-alpha.1`）→ npm 取范围内最大值 = alpha.2 |
+
+⇒ **`0.1.6-alpha.1` 今天装不出能跑的树**（清空重装也一样，npm 仍会选 alpha.2 的依赖）。
+这是**上游的发布问题**（预发布用 `^` 范围 + 新版删了符号），不是 DShell 的 bug ——
+但它落在我们的功能路径上，所以必须防。
+
+**产品侧的两处改动**：
+
+| 改动 | 理由 |
+| --- | --- |
+| 降级警告从"会话格式单向"扩成**两条**，并点名 `0.1.6-alpha.1` 这个实测案例 | 原来的警告让用户以为降级只是"少用几个新功能"，实际可能直接把 dsh 装成起不来 |
+| 「装完 dsh 起不来」时，失败卡片出现**「装回 <上一版>」按钮**（`app_switch_back`） | 原来那条路上唯一的出口是「跳过检查，直接启动」——**对"dsh 已经坏了"毫无用处**（必然再失败）。用户的现实困境就是"面板里的版本我都不敢点了" |
+
+`PREVIOUS_DSH`（切换前那一版的版本号）在 `do_switch_dsh` 开头记下（`npm ls -g`，本地命令），
+切换成功不再需要它；**刻意不自动回滚** —— 自动回滚会掩盖"新版不能用"这个事实，
+与 09 定下的取消语义同因。
+
+> **未做（值得单独立项）**：装完**先验证**再宣布成功；若验证失败则**自动**装回上一版。
+> 本轮只做"不自动"的那一半。
+>
+> ⚠️ **验证不能只跑 `dsh --version`**（我原本打算这么写，实测推翻）：那个坏掉的
+> `0.1.6-alpha.1` 现在 `dsh --version` **正常返回**，只有 `dsh web` 会炸 —— 两条命令走
+> 的代码路径不同（`--version` 在 commander 那层就返回了，没进 profile-boot）。
+> 真正的验证必须走**它自己的启动路径**：要么直接复用 `start_dsh` 的 doctor + handoff
+> （现在就是这么发现问题的），要么单独跑一次 `dsh web --port 0` 看它能不能打印地址。
+
+### 第四轮：带发布时间窗的降级（已实现，2026-09-21）
+
+第三轮证明"朴素降级会把 dsh 装坏"。用户提议用 `npm --before` 试 —— **先手工验证机制，再改造**，
+两步都做了。
+
+**机制验证（不改代码，直接跑 npm）**：
+
+| 步骤 | 命令 / 检查 | 结果 |
+| --- | --- | --- |
+| 第一次尝试 | `--before=2026-09-15T04:00Z`（取 alpha.1 自己发布时刻附近） | ❌ `ETARGET`：`dsh-client-ui-sidebar-documentpreview@^0.1.6-alpha.1` 那时还不存在 |
+| 原因 | `npm view <pkg> time` 逐个查 | 同一批包**错峰发布**：alpha.1 那波从 `03:09Z` 排到 **`04:17Z`**（比 dsh 自己的 `03:23Z` 还晚）；alpha.2 那波是 09-17 `13:38Z` 起 |
+| 第二次尝试 | `--before=2026-09-16T12:00Z`（两个发布波之间） | ✅ `added 1, removed 48, changed 440 in 30s` |
+| 树是否一致 | `dsh-app-boot` 的版本；`watchUserPatches` | ✅ **0.1.6-alpha.1**，符号在里面 |
+| **能不能跑** | `dsh web --port 0 --no-open` | ✅ 打印 token URL，监听 60622 |
+| 页面是否真能服务 | 带 token → 303 + cookie；带 cookie → 200 | ✅ `<title>DeepSeek Harness</title>` |
+| 收尾 | 杀进程后查端口与 node | ✅ 归零，无孤儿 |
+
+**因此定下的实现**（本节 ② 的两个片段）：
+
+1. `update::resolve_before(target)`：查发布时间表（`npm view … time`，合并进同一个 registry 缓存），
+   取"紧跟在 target 之后发布的那一版"，算出**中点**。目标就是最新版 ⇒ 没有 next ⇒ 返回 `None`（不需要窗口）。
+   - **不取 target 自己的时刻**（实测会 ETARGET）；取中点是因为它落在两个发布波之间。
+   - 这是个**启发式**（假定同一批发布在同一窗口内完成）。真撞上 `ETARGET` 时，
+     `installer` 会把 npm 的原始错误翻译成一句能懂的话（"该版本发布时同批的包还没发全"），
+     并保留原始输出，同时失败卡片上仍有「装回 …」。
+2. 窗口计算与 `stop_dsh` **并行**（`mpsc`）：首次那次 `view time`（约 1-2s）被停 dsh 的时间盖住，
+   用户感觉不到；之后都在 2 小时缓存里。
+3. 降级警告补了一句"会用发布时间窗安装"，让用户知道为什么这一步与升级不一样。
+
+**预期日志**（降级到 `0.1.6-alpha.1` 时）：
+
+```
+update: window for 0.1.6-alpha.1: 2026-09-15T03:23:13.750Z .. 2026-09-17T13:52:10.201Z (next=0.1.6-alpha.2) -> --before=2026-09-16T08:37:41.975Z
+install dsh: resolving as of 2026-09-16T08:37:41.975Z
+```
+面板的日志区也会显示完整命令（含 `--before=…`）：`display_command` 把它一并打出来。
+
+**未验的部分**：这条链在 DShell 里的端到端表现（点「切换」→ 日志出现上面两行 → 装完能起）
+需要人工点一次。手工机制验证已通过，且 DShell 侧的编排就是"同一组命令 + 同一个验证路径"。
+
+### 遗留项
+
+1. ~~**每开一次面板跑 5 条 npm 命令**~~ → **已做**（2026-09-21）：registry 那半边 2 小时磁盘缓存 +
+   "先用上次结果渲染、过期再后台重查"（实测三态见上文「缓存实测」）。**代价**：过期那次会多跑一遍
+   本地命令（后台重查后再推一份时 `current` 重新现查一次），约 1 秒，只发生在过期路径上。
+2. `shutting down: killing the dsh process tree (pid N)` 打印**两次**：既有代码里
+   `RunEvent::ExitRequested` 与 `RunEvent::Exit` 被同一个分支匹配，清理跑两遍。
+   无害（第二次是 kill 一个已死的 pid），**非本项引入**（`git diff` 未触及那段）。
+   理论隐患：pid 在两遍之间被系统回收给别的进程时会误杀（概率极低）。
+   修法两行（kill 完把 pid 清零），**待拍板**。
+3. **人工验收**：
+   - **T9 降级**：机制**已手工验证**（npm `--before` 那条链，见「第四轮」）；**DShell 内那条路径
+     还没点过** —— 预期日志见第四轮末尾，出现那两行且装完能起即算通过。
+   - 仍未验：T10 同版本重装、T11 更新失败后的出口、T12 来源伪装拒绝、
+     D3 关于页的开源清单（本轮明确只占位）。
+4. **装完自动验证 + 自动回滚**：未做，且已确认**不能拿 `dsh --version` 当验证**
+   （第三轮末尾的自我纠正）。真要做，验证得复用 `start_dsh` 的 doctor+handoff（或单跑一次
+   `dsh web --port 0`），失败则自动装回上一版 —— 但自动回滚会掩盖"新版不能用"这个事实，
+   与 09 定下的取消语义冲突，**得先拍板**。
 

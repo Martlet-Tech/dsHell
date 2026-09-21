@@ -58,6 +58,12 @@ mod imp {
             buffer: *mut u16,
             size: *mut u32,
         ) -> i32;
+        fn GetDiskFreeSpaceExW(
+            directory: *const u16,
+            free_to_caller: *mut u64,
+            total: *mut u64,
+            total_free: *mut u64,
+        ) -> i32;
     }
 
     #[link(name = "user32")]
@@ -245,6 +251,23 @@ mod imp {
         unsafe { CloseHandle(handle) };
         waited == WAIT_OBJECT_0
     }
+
+    /// 某个目录所在卷的可用空间（给用户看的 `FreeBytesAvailable`）。
+    ///
+    /// 为什么要问这个：换 dsh 版本要一次性重装 400+ 个包，写的是 npm 缓存所在的盘。
+    /// 2026-09-21 实测踩过一次 —— 系统盘（256G SSD）只剩 12G / 已用 95%、而 npm 缓存
+    /// 本身 15G，那次降级的写入高峰把整台机器拖死了（Kernel-Power 41 异常关机）。
+    /// 面板据此在切换前给一句警告：接近写满的 SSD 上，写入突发可能拖住整个系统。
+    pub fn free_space_bytes(dir: &str) -> Option<u64> {
+        let path = wide(dir);
+        let mut avail: u64 = 0;
+        let mut total: u64 = 0;
+        let mut free: u64 = 0;
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(path.as_ptr(), &mut avail, &mut total, &mut free)
+        };
+        (ok != 0).then_some(avail)
+    }
 }
 
 #[cfg(not(windows))]
@@ -267,6 +290,13 @@ mod imp {
     pub fn wait_process_exit(_pid: u32, _timeout: Duration) -> bool {
         true
     }
+
+    /// 非 Windows 平台没有实现。
+    pub fn free_space_bytes(_dir: &str) -> Option<u64> {
+        None
+    }
 }
 
-pub use imp::{acquire_single_instance, focus_existing_instance, wait_process_exit};
+pub use imp::{
+    acquire_single_instance, focus_existing_instance, free_space_bytes, wait_process_exit,
+};

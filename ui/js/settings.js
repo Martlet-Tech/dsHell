@@ -315,10 +315,34 @@ function askSwitch() {
       : `当前 ${cur || "未知"} → 目标 ${target}。\n\ndsh 会先停止，装完自动重启，进行中的对话会中断。`;
 
   const warn = $("m-warn");
+  const risks = [];
   if (older) {
+    // 两条风险都要说，而且都有实证。降级不是"少用几个新功能"那么轻：
+    //   · 数据单向：dsh 自己的 AGENTS.md 写了 predecessors imply neither fallback nor
+    //     downgrade support。
+    //   · **可能直接装不起来**：dsh 用 `^` 范围引用同级包，旧核心会配到新依赖。
+    //     实测 0.1.6-alpha.1 —— 新版 @deepseek-ai/dsh-app-boot 删掉了
+    //     `watchUserPatches`，旧核心 import 它，dsh 一启动就 SyntaxError 退出。
+    risks.push(
+      "· <b>数据</b>：会话格式是单向的，旧版可能读不到新版写出的会话。" +
+        "<br>· <b>可能装不起来</b>：dsh 的包之间用 <code>^</code> 版本范围引用，旧核心会配到新版依赖" +
+        "（实测 <code>0.1.6-alpha.1</code> 就是这样）。" +
+        "<br>所以降级会用<b>发布时间窗</b>安装（npm <code>--before</code>，把依赖解析拉回该版本发布时的样子）。"
+    );
+  }
+  // 磁盘空间：换版本要重装 400+ 个包（写 npm 缓存所在的盘）。接近写满的 SSD 上，
+  // 写入突发会把整个系统拖住 —— 2026-09-21 实测：系统盘 12G 可用/95% 已用，机器直接死机。
+  const free = S.about && S.about.disk ? S.about.disk.free_gb : null;
+  if (typeof free === "number" && free < 20) {
+    risks.push(
+      `· <b>磁盘快满了</b>：系统盘只剩 <b>${free} GB</b>。换版本要重装 400+ 个包` +
+        "（写的是 npm 缓存所在的盘），接近写满时磁盘掉速可能拖住整个系统。" +
+        "<br>建议先清理，或把缓存挪到别的盘：<code>npm config set cache D:\\npm-cache</code>"
+    );
+  }
+  if (risks.length) {
     warn.hidden = false;
-    warn.textContent =
-      "降级有风险：dsh 的会话数据格式是单向的，旧版可能读不到新版本写出的会话。确认要装回更旧的版本吗？";
+    warn.innerHTML = (older ? "降级有两条风险：" : "切换前提醒：") + "<br>" + risks.join("<br>");
   } else {
     warn.hidden = true;
   }

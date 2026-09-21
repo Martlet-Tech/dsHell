@@ -41,6 +41,13 @@ pub fn menu_restart_dsh() -> &'static str {
     }
 }
 
+/// 打开主窗口内的设置面板（覆盖层，不是独立窗口）。
+pub fn menu_settings() -> &'static str {
+    match current() {
+        Lang::ZhCn => "设置",
+    }
+}
+
 // ── 关闭确认弹窗（三键） ────────────────────────────────
 
 pub fn close_dialog_title() -> &'static str {

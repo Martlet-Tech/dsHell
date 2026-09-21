@@ -112,10 +112,23 @@ fn spawn_child(program: &str, args: &[&str], path_env: Option<String>) -> std::i
 /// 通过 `cmd /c` 跑：用于依赖 PATH/PATHEXT 解析的东西（npm、dsh 都是 .cmd，
 /// 直接 CreateProcess 会失败）。
 pub fn run_shell(args: &[&str], timeout: Duration) -> std::io::Result<Output> {
+    run_shell_env(args, timeout, None)
+}
+
+/// 同 `run_shell`，但能前置 PATH。
+///
+/// 用户在「指定…」里改过 node / npm 路径时**必须**用这个：配置里的路径只进
+/// `cfg.child_path_env()`，而进程自己的 PATH 不会被改。体检里的 `dsh` 探测就是
+/// 这个道理——否则"指定了 npm 路径"对版本查询不起作用。
+pub fn run_shell_env(
+    args: &[&str],
+    timeout: Duration,
+    path_env: Option<String>,
+) -> std::io::Result<Output> {
     let mut all = Vec::with_capacity(args.len() + 1);
     all.push("/c");
     all.extend_from_slice(args);
-    run_capture("cmd", &all, timeout)
+    run_capture_env("cmd", &all, timeout, path_env)
 }
 
 /// 跑一个已知路径的命令（node.exe 直连；.cmd 自动套 `cmd /c`）。
@@ -124,7 +137,16 @@ pub fn run_path(exe: &Path, args: &[&str], timeout: Duration) -> std::io::Result
 }
 
 pub fn run_capture(program: &str, args: &[&str], timeout: Duration) -> std::io::Result<Output> {
-    let mut child = spawn_child(program, args, None)?;
+    run_capture_env(program, args, timeout, None)
+}
+
+pub fn run_capture_env(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    path_env: Option<String>,
+) -> std::io::Result<Output> {
+    let mut child = spawn_child(program, args, path_env)?;
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
 

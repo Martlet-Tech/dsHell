@@ -15,6 +15,7 @@ use crate::{lifecycle, ui_text};
 const MENU_ID_QUIT: &str = "tray-quit";
 const MENU_ID_OPEN_BROWSER: &str = "tray-open-browser";
 const MENU_ID_RESTART_DSH: &str = "tray-restart-dsh";
+const MENU_ID_SETTINGS: &str = "tray-settings";
 /// 托盘图标 id
 const TRAY_ID: &str = "main-tray";
 
@@ -26,6 +27,8 @@ enum TrayAction {
     OpenInBrowser,
     /// 菜单「重启 dsh 后端」
     RestartDsh,
+    /// 菜单「设置」（主窗口内的覆盖层）
+    OpenSettings,
     /// 菜单「完全退出」
     Quit,
 }
@@ -49,8 +52,18 @@ pub fn init(app: &App) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let settings_item = MenuItem::with_id(
+        app,
+        MENU_ID_SETTINGS,
+        ui_text::menu_settings(),
+        true,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, MENU_ID_QUIT, ui_text::menu_quit(), true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_browser_item, &restart_item, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[&settings_item, &open_browser_item, &restart_item, &quit_item],
+    )?;
 
     // 复用 exe 图标：不新增任何资源文件。
     // 拿不到时（tauri.conf.json 的 bundle.icon 为空）托盘无图标，但仍要建出来，
@@ -68,6 +81,8 @@ pub fn init(app: &App) -> tauri::Result<()> {
                 dispatch(app, TrayAction::OpenInBrowser);
             } else if id == MENU_ID_RESTART_DSH {
                 dispatch(app, TrayAction::RestartDsh);
+            } else if id == MENU_ID_SETTINGS {
+                dispatch(app, TrayAction::OpenSettings);
             }
         })
         .on_tray_icon_event(|tray, event| {
@@ -102,6 +117,7 @@ fn dispatch(app: &AppHandle, action: TrayAction) {
         TrayAction::RestoreWindow => lifecycle::restore_main_window(app),
         TrayAction::OpenInBrowser => crate::open_dsh_in_browser(app),
         TrayAction::RestartDsh => crate::restart_dsh(app),
+        TrayAction::OpenSettings => crate::open_settings(app),
         TrayAction::Quit => lifecycle::quit(app),
     }
 }

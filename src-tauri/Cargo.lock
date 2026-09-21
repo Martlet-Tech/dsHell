@@ -641,8 +641,9 @@ dependencies = [
 
 [[package]]
 name = "dshell"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
+ "semver",
  "serde",
  "serde_json",
  "tauri",

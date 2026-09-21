@@ -1,6 +1,6 @@
 [package]
 name = "dshell"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Minimal desktop container for the DeepSeek Harness Web GUI"
 
@@ -17,6 +17,10 @@ tauri = { version = "2", features = ["tray-icon", "common-controls-v6"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 版本台账要做**预发布比较**（0.1.5-rc.1 vs 0.1.5-rc.2 vs 0.1.5），字符串比较会判错方向
+# （比如把新版判成旧版，提示用户降级）。semver 1.0.28 本来就是 tauri 的传递依赖、
+# 已在 Cargo.lock 里，所以升为直接依赖不新增任何需要下载或编译的包。
+semver = "1"
 
 [profile.release]
 opt-level = "s"

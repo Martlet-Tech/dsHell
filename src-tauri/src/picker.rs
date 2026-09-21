@@ -37,9 +37,12 @@
 //!
 //! ## dsh 侧是怎么接上的：一个普通插件
 //!
-//! 这一环是 R17 失败后最大的修正。之前想靠**页面注入**去改 dsh 的行为，
-//! 但实测证明 `initialization_script` 与 `eval` **两条注入通道都是死的**
-//! （脚本第一行的 `sendBeacon` 一次都没到）——页面里从来没有我们的代码。
+//! 这一环是 R17 失败后最大的修正。之前想靠**页面注入**去改 dsh 的 `pick` 行为，
+//! 那条路当时判的是"注入通道是死的"。**这个判断后来被推翻了**（2026-09-20 的覆盖层
+//! 实验证明 `eval` 注入确实生效，见 `docs/design.md` 的更正一节与 `settings.rs`），
+//! 但**结论不变、理由变了**：即便注入可用，改 `pick` 也不该靠"在页面里替换 dsh 的
+//! 函数"——那是 hack。dsh 把"怎么选目录"做成了官方 capability seam，走插件才是
+//! 正确位置（不改 dsh 源码、不注入、dsh 自己会加载它）。
 //!
 //! 正确的位置**不在页面里，而在 dsh 的 host 进程里**。dsh 把「怎么选目录」做成了
 //! 一个 capability seam（`@deepseek-ai/dsh-host-directory-picker`），
@@ -156,14 +159,21 @@ pub fn start(app: AppHandle) -> Option<u16> {
 /// 本端点**不看请求体**：调用方（dsh 插件）只发一个带令牌的空 POST。
 /// 所以这里读完头部就够了，不需要按 `Content-Length` 再收一段——
 /// 少一段就少一处能出错的地方。
-struct Request {
-    method: String,
-    path: String,
+///
+/// `pub(crate)`：`settings.rs` 的回传端点复用这几个原语（同一种极简 HTTP 服务，
+/// 两处各写一份只会多一处能出错的地方）。两边的**认证模型不同**：
+/// 这里认 `x-dshell-token` 头（调用方是 dsh 的 host 进程，没有 `Origin`），
+/// 那里认路径里的 nonce + `Origin`（调用方是页面，拿不到自定义头）。
+pub(crate) struct Request {
+    pub method: String,
+    pub path: String,
     /// 共享令牌（`x-dshell-token` 头）。
-    token: Option<String>,
+    pub token: Option<String>,
+    /// `Origin` 头（页面发起的请求会有；Node 的 `fetch` 不会）。
+    pub origin: Option<String>,
 }
 
-fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
+pub(crate) fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
     // 原生对话框可能开着几十秒，读超时给宽一点，但不无限等。
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -199,12 +209,16 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
     let path = parts.next().unwrap_or_default().to_string();
 
     let mut token = None;
+    let mut origin = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        if name.trim().eq_ignore_ascii_case("x-dshell-token") {
+        let name = name.trim();
+        if name.eq_ignore_ascii_case("x-dshell-token") {
             token = Some(value.trim().to_string());
+        } else if name.eq_ignore_ascii_case("origin") {
+            origin = Some(value.trim().to_string());
         }
     }
 
@@ -212,6 +226,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
         method,
         path,
         token,
+        origin,
     })
 }
 
@@ -219,7 +234,12 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn write_json(stream: &mut TcpStream, status: u16, reason: &str, body: &str) -> std::io::Result<()> {
+pub(crate) fn write_json(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &str,
+) -> std::io::Result<()> {
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: application/json; charset=utf-8\r\n\

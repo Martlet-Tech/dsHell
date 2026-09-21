@@ -62,6 +62,17 @@ window.__dshell = {
     stepsEl.innerHTML = "";
     STEP_IDS.forEach((id) => renderStep({ id: id, state: "pending", detail: "等待检查" }));
   },
+  /** 切换 dsh 版本期间：这条时间线的语义不对（六行"等待检查"杵在安装面板上方），
+   *  收起来。装完由 Rust 再调一次 `updating(false)`。 */
+  updating(on) {
+    stepsEl.hidden = !!on;
+    if (!on) skipEl.hidden = true;
+  },
+  /** 更新失败且 dsh 已被停止：把「跳过检查，直接启动」这个出口露出来。
+   *  它启动的是**当前已装**的版本 —— 失败后唯一的恢复路径。 */
+  updateFailed() {
+    skipEl.hidden = false;
+  },
 };
 
 /**

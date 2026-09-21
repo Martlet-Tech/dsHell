@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DShell 设置</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <!--
+      设置面板：跑在主窗口里的一个全屏 iframe 内（由壳层注入，见 src-tauri/src/settings.rs）。
+      它是**独立的本地页面**，所以可以直接在浏览器里打开调样式——那种情况下没有 `b`/`n`
+      两个参数，面板会显示"预览模式"并跳过所有回传。
+    -->
+    <div class="panel">
+      <header class="bar">
+        <div class="brand">DSHELL<span>设置</span></div>
+        <nav class="tabs" id="tabs"></nav>
+        <button class="icon" id="close" title="关闭（Esc）" aria-label="关闭">×</button>
+      </header>
+
+      <main id="views">
+        <section class="view" data-view="versions">
+          <div class="vhead">
+            <div class="summary" id="v-summary">正在查询 registry…</div>
+            <button id="v-refresh">刷新</button>
+          </div>
+          <div class="warnbar" id="v-source" hidden></div>
+          <div class="vscroll" id="v-scroll">
+            <ul class="vlist" id="v-list"></ul>
+            <div class="more" id="v-more"></div>
+          </div>
+          <div class="vfoot">
+            <span class="sel" id="v-sel">未选择目标版本</span>
+            <button class="primary" id="v-switch" disabled>切换到所选版本</button>
+          </div>
+        </section>
+
+        <section class="view" data-view="about">
+          <div class="about">
+            <div class="mark">
+              <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                <defs>
+                  <linearGradient id="g" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+                    <stop stop-color="#7dd3fc" />
+                    <stop offset=".5" stop-color="#5b8cff" />
+                    <stop offset="1" stop-color="#8b5cf6" />
+                  </linearGradient>
+                </defs>
+                <path d="M11 7.5 9 24.5" stroke="url(#g)" stroke-width="2.4" stroke-linecap="round" />
+                <path d="M19.5 7.5c4.6 0 7.2 2.4 7.2 6.1 0 3.9-2.9 6.4-7.6 6.4h-3" stroke="url(#g)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </div>
+            <h1>DShell</h1>
+            <p class="tag">DeepSeek Harness · Desktop Shell</p>
+            <dl class="facts">
+              <dt>版本</dt>
+              <dd id="a-version">—</dd>
+              <dt>dsh 后端</dt>
+              <dd id="a-dsh">—</dd>
+              <dt>dsh 路径</dt>
+              <dd class="mono" id="a-path">—</dd>
+            </dl>
+            <h2>开源清单</h2>
+            <div class="placeholder">
+              <b>待补充。</b>
+              <p>
+                这里将列出壳层用到的开源组件及其许可证（Tauri / wry / serde / semver /
+                tauri-plugin-dialog …），以及随 exe 发布的 dsh 插件。
+              </p>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="foot">
+        <span class="note" id="note"></span>
+        <div class="btns">
+          <button id="cancel">取消</button>
+          <button class="primary" id="ok">确定</button>
+        </div>
+      </footer>
+    </div>
+
+    <div class="modal" id="modal" hidden>
+      <div class="sheet">
+        <h3 id="m-title">切换 dsh 版本</h3>
+        <p id="m-body"></p>
+        <div class="warn" id="m-warn" hidden></div>
+        <div class="mbtns">
+          <button id="m-cancel">再想想</button>
+          <button class="primary" id="m-go">切换</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+
+    <!--
+      模块加载的兜底（与启动页同一处置，理由也同）：拆成 module 之后多出一种失败方式
+      —— 文件没取到 / MIME 不对被拒 → 面板里什么都没有。而面板恰恰是唯一能说明这件事的
+      地方（外层的 dsh 页面看不见我们的内部状态）。
+    -->
+    <script>
+      (function () {
+        function report() {
+          if (window.__settingsBooted) return;
+          var el = document.getElementById("m-body");
+          var t = document.getElementById("m-title");
+          var m = document.getElementById("modal");
+          if (!m || !el || !t) return;
+          t.textContent = "设置面板脚本未能加载";
+          el.textContent =
+            "这通常是打包不完整或文件损坏。按 Esc 关闭；完整日志：%USERPROFILE%\\.dshell\\dshell-poc.log";
+          m.hidden = false;
+        }
+        window.addEventListener("error", function (e) {
+          if (e && e.target && e.target.tagName === "SCRIPT") report();
+          else if (e && e.message) report();
+        }, true);
+        window.addEventListener("unhandledrejection", report);
+      })();
+    </script>
+    <script type="module" src="js/settings.js"></script>
+  </body>
+</html>

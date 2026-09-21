@@ -57,32 +57,88 @@ pub struct Outcome {
     pub error: Option<String>,
 }
 
-fn command_for(kind: Kind) -> (&'static str, Vec<&'static str>) {
+/// `Kind::Dsh` 装的包，也是版本查询用的包名（`update.rs` 共用这一个来源）。
+pub const DSH_PACKAGE: &str = "@deepseek-ai/dsh";
+
+fn command_for(kind: Kind, target: Option<&str>) -> (String, Vec<String>) {
     match kind {
         Kind::Node => (
-            "winget",
-            vec![
+            "winget".to_string(),
+            [
                 "install",
                 "--id",
                 "OpenJS.NodeJS.LTS",
                 "--exact",
                 "--accept-package-agreements",
                 "--accept-source-agreements",
-            ],
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         ),
-        Kind::Dsh => ("cmd", vec!["/c", "npm", "i", "-g", "@deepseek-ai/dsh"]),
+        Kind::Dsh => {
+            // 带 target 时是"装指定版本"：npm 对已装包语义即升级，对同版本即重装，
+            // 对更低版本即降级——三条路径都是同一条命令。
+            let spec = match target {
+                Some(v) => format!("{DSH_PACKAGE}@{v}"),
+                None => DSH_PACKAGE.to_string(),
+            };
+            (
+                "cmd".to_string(),
+                ["/c", "npm", "i", "-g"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .chain(std::iter::once(spec))
+                    .collect(),
+            )
+        }
     }
 }
 
+/// 版本号字符集白名单：`0-9 A-Za-z . - +`。
+///
+/// **这是把外部输入拼进安装命令的唯一入口**（版本号来自固定端点的请求），
+/// 所以在这里一次挡住：`npm i -g @deepseek-ai/dsh@<v>` 里 `<v>` 若含 `&` `"` 空格
+/// 之类，就不再是一个参数了。与 `proc::validate_user_path` 同一套理由。
+fn valid_version(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 64
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
 /// 安装命令是长跑，必须能取消（npm 会拉起一堆子进程，`/T` 一起收）。
-pub fn run(app: &AppHandle, kind: Kind, state: &AppState) -> Outcome {
+///
+/// `target` = 要装的指定版本（`None` = 装/升级到默认 dist-tag，即「一键安装」的行为）。
+pub fn run(app: &AppHandle, kind: Kind, state: &AppState, target: Option<&str>) -> Outcome {
+    if let Some(v) = target {
+        if !valid_version(v) {
+            crate::log(&format!(
+                "install {}: rejected target version (unexpected characters): {v}",
+                kind.id()
+            ));
+            return Outcome {
+                ok: false,
+                cancelled: false,
+                error: Some(format!("版本号 `{v}` 含意外字符，已拒绝执行")),
+            };
+        }
+    }
+
     let cfg = Config::load();
-    let (program, args) = command_for(kind);
+    let (program, args) = command_for(kind, target);
     let path_env = cfg.child_path_env();
+
+    // 带目标版本 = 用户明确指了要装哪个（版本页的切换），此时"更新"比"安装"准。
+    let verb = if target.is_some() { "正在更新" } else { "正在安装" };
+    let what = match target {
+        Some(v) => format!("{}@{v}", kind.title()),
+        None => kind.title().to_string(),
+    };
 
     let log: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::with_capacity(220)));
     let percent: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
-    let phase: Arc<Mutex<String>> = Arc::new(Mutex::new(format!("正在安装 {}", kind.title())));
+    let phase: Arc<Mutex<String>> = Arc::new(Mutex::new(format!("{verb} {what}")));
     let started = Instant::now();
     let done = Arc::new(AtomicBool::new(false));
 
@@ -141,7 +197,8 @@ pub fn run(app: &AppHandle, kind: Kind, state: &AppState) -> Outcome {
     state.cancel.reset();
     emit(&app, kind, &phase, &percent, started, &log, true);
 
-    let mut child = match proc::spawn_streaming(program, &args, Some(path_env), cb) {
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let mut child = match proc::spawn_streaming(&program, &arg_refs, Some(path_env), cb) {
         Ok(c) => c,
         Err(e) => {
             crate::log(&format!("install {}: spawn failed: {e}", kind.id()));

@@ -21,8 +21,10 @@ mod lifecycle;
 mod picker;
 mod plugin;
 mod proc;
+mod settings;
 mod tray;
 mod ui_text;
+mod update;
 mod win32;
 
 /// 主窗口 label —— 全项目唯一来源，避免 "main" 字符串散落各处。
@@ -188,7 +190,9 @@ pub fn log(msg: &str) {
 
 /// 把文本编成 base64 再送进页面：穿过"JS 字符串字面量 → innerHTML"两层上下文时，
 /// 手写转义很脆，base64 载荷在两种上下文里都是惰性的。
-fn b64(s: &str) -> String {
+///
+/// `pub(crate)`：`settings.rs` 注入 shim 与推数据时用的是同一条约定。
+pub(crate) fn b64(s: &str) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -606,6 +610,139 @@ fn do_restart_dsh(app: &AppHandle) {
     start_dsh(app, &window);
 }
 
+/// 切换到指定 dsh 版本 = `show_splash` + `stop_dsh` + `install(dsh@target)` + `start_dsh`。
+///
+/// 与 `restart_dsh` 的唯一差别就是中间那一段"装"，所以两者共用同一组原语，
+/// 而不是各写一条链（见 docs/plan/09 的推导）。顺序不能动，每一步都在挡一个具体的失败：
+///
+///   1. 先关设置面板 —— 它马上要随文档一起没了，显式关掉日志才说得清
+///   2. `show_splash` —— 进度与失败卡片必须有监听者（08 的 `about:blank` 类缺陷）
+///   3. `stop_dsh` —— `npm i -g` 要覆盖的文件正被活着的 dsh 锁着（node 加载中的 native addon）
+///   4. 装（可取消）
+///   5. `start_dsh` —— 体检 + handoff
+///
+/// `restart_guard` 必须跨 3+4 **全程**：启动页一加载完就会自己叫体检，放它过去就会在
+/// **文件被覆盖的中途**拉起第二个 dsh 后端。
+fn do_switch_dsh(app: &AppHandle, target: &str) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        log("switch: main window is gone - aborting");
+        return;
+    };
+
+    settings::hide(app);
+    app.state::<AppState>()
+        .restart_guard
+        .store(true, Ordering::SeqCst);
+
+    if !show_splash(app, &window) {
+        log("switch: aborting (the window would have nowhere to show progress)");
+        app.state::<AppState>()
+            .restart_guard
+            .store(false, Ordering::SeqCst);
+        splash_fail(
+            &window,
+            concat!(
+                "<b>无法切换版本</b>\n\n",
+                "没有记下启动页地址，切换后界面会无处显示进度。\n\n",
+                "请「完全退出」DShell 再重新打开。"
+            ),
+        );
+        return;
+    }
+
+    // 窗口可能缩在托盘里：把界面亮出来，否则用户看不到任何反应。
+    lifecycle::restore_main_window(app);
+    // 更新期间步骤时间线语义不对（六行"等待检查"杵在安装面板上方），让启动页收起来。
+    let _ = window.eval("window.__dshell&&window.__dshell.updating(true)");
+
+    if !stop_dsh(app) {
+        app.state::<AppState>()
+            .restart_guard
+            .store(false, Ordering::SeqCst);
+        let _ = window.eval("window.__dshell&&window.__dshell.updating(false)");
+        splash_fail(
+            &window,
+            concat!(
+                "<b>旧 dsh 没有退出，切换已放弃</b>\n\n",
+                "它的进程可能卡住了。请「完全退出」DShell，再重新打开。\n\n",
+                "这样做的原因：两个 dsh 后端会抢同一份会话锁，而且 `npm i -g` 要覆盖的\n",
+                "文件正被它锁着"
+            ),
+        );
+        return;
+    }
+
+    let outcome = {
+        let state = app.state::<AppState>();
+        installer::run(app, installer::Kind::Dsh, &state, Some(target))
+    };
+
+    // 无论成败都要放行体检通道，否则失败卡片上的出口会变成死按钮。
+    app.state::<AppState>()
+        .restart_guard
+        .store(false, Ordering::SeqCst);
+
+    if !outcome.ok {
+        // dsh 已经被停了，而这里**不自动起回**：自动起回会掩盖"更新没成功"这个事实，
+        // 而用户此刻最需要知道的就是它。出口交给用户自己点（语义见 09 ③ 的决策 1）。
+        let why = outcome.error.unwrap_or_else(|| "未知原因".to_string());
+        log(&format!("switch: install failed: {why}"));
+        splash_fail(
+            &window,
+            &format!(
+                concat!(
+                    "<b>更新 dsh 失败</b>\n\n",
+                    "{}\n\n",
+                    "dsh 后端已停止。要恢复使用，点下面的「跳过检查，直接启动」——",
+                    "它会启动<b>当前已装</b>的那个版本。"
+                ),
+                esc(&why)
+            ),
+        );
+        let _ = window.eval("window.__dshell&&window.__dshell.updateFailed()");
+        return;
+    }
+
+    settings::clear_selection();
+    let _ = window.eval("window.__dshell&&window.__dshell.updating(false)");
+    start_dsh(app, &window);
+}
+
+/// 切换版本的入口（由设置面板的回传端点调用）。
+///
+/// 与「重启 dsh 后端」共用 `restarting` 闩：两者都是"停旧 → 起新"的链，
+/// 同时跑会互相杀，也会撞上会话锁。
+pub(crate) fn start_switch_dsh(app: &AppHandle, target: String) {
+    {
+        let state = app.state::<AppState>();
+        if state.restarting.swap(true, Ordering::SeqCst) {
+            log("switch: another restart/switch is in progress - ignoring");
+            return;
+        }
+    }
+
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // 闩的清除放在 `catch_unwind` 之后（与 `restart_dsh` 同因）：
+        // 一次 panic 不该让切换从此静默失效。
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            do_switch_dsh(&app, &target);
+        }));
+        if result.is_err() {
+            log("switch: panicked - the restarting latch is being cleared");
+        }
+        app.state::<AppState>()
+            .restarting
+            .store(false, Ordering::SeqCst);
+    });
+}
+
+/// 托盘「设置」：先把窗口亮出来（可能缩在托盘里），再注入面板。
+pub(crate) fn open_settings(app: &AppHandle) {
+    lifecycle::restore_main_window(app);
+    settings::open(app);
+}
+
 /// 起 `dsh web`：隐藏窗口、stdout/stderr 都接管、PATH 里前置用户指定的目录
 /// （否则"指定了 node 路径"这件事对 dsh 不起作用）。
 ///
@@ -814,7 +951,8 @@ async fn install_missing(app: AppHandle) -> Result<(), String> {
         for kind in queue {
             let outcome = {
                 let state = app.state::<AppState>();
-                installer::run(&app, kind, &state)
+                // `None` = 装默认 dist-tag（"补齐"语义）。带版本号的更新走 `do_switch_dsh`。
+                installer::run(&app, kind, &state, None)
             };
             let _ = app.emit(
                 "install://done",
@@ -938,6 +1076,13 @@ fn main() {
                 None => log("picker: bridge unavailable - the workspace picker will fall back"),
             }
 
+            // 设置面板的回传端点（面板 → 壳层）：与 picker 一样挂在辅助端口上，
+            // 失败了只是"设置面板打不开"，不该拦住启动。
+            match settings::start(app.handle().clone()) {
+                Some(p) => log(&format!("settings: bridge listening on 127.0.0.1:{p}")),
+                None => log("settings: bridge unavailable - the settings panel will not open"),
+            }
+
             // 先把启动页弹出来：它是本地页面，瞬时绘制、不会 401，
             // 体检期间屏幕上一直是它（而不是空白）。
             let window = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
@@ -992,6 +1137,12 @@ fn main() {
                     let handle = app.handle().clone();
                     move |_window, payload| {
                         let url = payload.url().clone();
+                        // 换文档 = 覆盖层连同里面的 iframe 一起没了（设置面板是主窗口里的
+                        // 覆盖层，不是独立窗口）。面板自己那次加载正常不会走到这里
+                        // （那是子框架），挡住只为万一。
+                        if !url.path().ends_with("settings.html") {
+                            crate::settings::reset_for_document();
+                        }
                         // 只认我们自己的页面。刻意排除 `about:blank`：
                         // 它同样以 `about` 开头，但它不是启动页。
                         let is_splash = matches!(url.scheme(), "tauri" | "asset")

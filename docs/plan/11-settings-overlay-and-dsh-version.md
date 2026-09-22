@@ -658,6 +658,23 @@ install dsh: resolving as of 2026-09-16T08:37:41.975Z
 
 第 1 条已固化成单测；第 2 条用 `absent` 集合解决（`NotesCache.absent`）。
 
+### 第七轮：乱码（2026-09-23，用户实测报回）
+
+真机第一次点开就是 `ä½?éª?ä¼?å?`。**根因是注入 shim 里的裸 `atob`**：它给 Latin-1，
+而 Rust 侧的 `b64()` 编的是 UTF-8 字节。`体验优化` → `ä½?éª?ä¼?å?`，与截图逐字吻合。
+完整分析见 `design.md`。
+
+| 项 | 内容 |
+| --- | --- |
+| 影响面 | shim 的 `push()` / `status()` / `__URL__` / `__NONCE__` 四处，全部改走 `dec()` |
+| 为什么一直没暴露 | 以前推的字段几乎全是 ASCII（版本号 / 日期 / URL），而 ASCII 在两种解码下**逐字节等价**。更新内容是第一批成段中文 |
+| 为什么我上一轮的预览没抓到 | **夹具绕过了 shim**（直接 `postMessage` 喂 JSON），而乱码就发生在被绕过的那一层 —— 用替身验证替身 |
+| 修法 | shim 里加 `dec()`（照抄启动页 `transport.js` 的正确实现；shim 必须自包含所以不能 import） |
+| 防回归 | `settings::tests::shim_decodes_base64_as_utf8` **扫源码文本**，禁止 shim 里出现裸 `atob`；另加 `utf8_vs_latin1_decoding_differ_on_chinese` |
+| 换了验证方式 | 端到端测试改为**从 `settings.rs` 抠出真 SHIM**、填占位符、让页面真执行、用 shim 自己的 `push()` 推中文 —— 链上每一环都是产品代码。实测修前 `ä½?éª?ä¼?å?` / 修后 `体验优化`，并断言渲染结果里不许出现 Latin-1 乱码特征字符 |
+
+`cargo test --bins` → **20 passed**（本轮 +2）。
+
 ### 遗留项
 
 1. ~~**每开一次面板跑 5 条 npm 命令**~~ → **已做**（2026-09-21）：registry 那半边 2 小时磁盘缓存 +

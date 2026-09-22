@@ -88,9 +88,25 @@ const READY_TIMEOUT: Duration = Duration::from_millis(2500);
 /// （用 `r##"…"##`：里面含 CSS 颜色，`"#` 会提前结束 `r#"…"#`。）
 const SHIM: &str = r##"
 (function () {
-  var url = atob("__URL__");
+  // base64 → **UTF-8** 文本。
+  //
+  // 不能写成裸的 `atob(b64)`：`atob` 给的是 Latin-1（一个字符一个字节），
+  // 于是 Rust 侧按 UTF-8 编出去的"体验优化"（E4 BD 93 E9 AA 8C …）到这儿就变成
+  // `ä½?éª?ä¼?å?` 上屏 —— 用户 2026-09-23 报的"乱码"就是它。
+  //
+  // 这个缺陷一直在（`source_note`、错误文案里本来就有中文），只是以前推过去的字段
+  // 几乎全是 ASCII（版本号、日期、URL），所以没露出来；更新内容是第一批成段中文。
+  // 启动页的 `ui/js/transport.js` 从一开始就是对的解码，这里是把它抄一份过来：
+  // shim 必须自包含（被 `eval` 注入陌生文档，不能依赖外部文件）。
+  function dec(b64) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder("utf-8").decode(bytes);
+  }
+  var url = dec("__URL__");
   var port = __PORT__;
-  var nonce = atob("__NONCE__");
+  var nonce = dec("__NONCE__");
   var base = "http://127.0.0.1:" + port + "/_dshell/" + nonce + "/settings/";
   function beacon(action) {
     try { navigator.sendBeacon(base + action); } catch (e) {}
@@ -128,7 +144,7 @@ const SHIM: &str = r##"
       },
       push: function (b64) {
         if (!this.frame || !this.frame.contentWindow) return;
-        var json = atob(b64);
+        var json = dec(b64);
         this.frame.contentWindow.postMessage({ __dshell: 1, payload: json }, "*");
       },
       status: function (b64) {
@@ -145,7 +161,7 @@ const SHIM: &str = r##"
           ].join(";") + ";");
           this.host.appendChild(el);
         }
-        el.textContent = atob(b64);
+        el.textContent = dec(b64);
       }
     };
     // Esc 关闭：焦点不在 iframe 里时（事件落在 dsh 文档上）由这里兜底。
@@ -587,4 +603,54 @@ fn set_selected(v: Option<String>) {
 /// 供 `main.rs` 在切换流程里清选中项（切换成功后旧选中就没意义了）。
 pub fn clear_selection() {
     set_selected(None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 注入的 shim 里**不许有裸的 `atob(...)`** —— 一律走 `dec()`。
+    ///
+    /// 这条守的是用户 2026-09-23 报的"乱码"：`atob` 给 Latin-1，Rust 侧按 UTF-8
+    /// 编出去的中文到面板就成了 `ä½?éª?ä¼?å?`。缺陷很隐蔽 —— 推过去的字段以前几乎
+    /// 全是 ASCII（版本号 / 日期 / URL），所以这个 shim 写了很久都没暴露；
+    /// 更新内容是第一批成段中文，一下就炸了。
+    ///
+    /// 用"扫源码文本"这种粗办法是因为真正的失效点在浏览器里（`eval` 注入的字符串），
+    /// Rust 这边没有可断言的返回值 —— 这条测试至少能挡住"又写回 atob"。
+    #[test]
+    fn shim_decodes_base64_as_utf8() {
+        assert!(SHIM.contains("function dec(b64)"), "shim 里应有 UTF-8 解码器");
+        assert!(SHIM.contains("new TextDecoder(\"utf-8\")"), "解码器必须显式指定 utf-8");
+
+        // 逐处：`atob(` 只允许出现在 dec() 自己内部。
+        // 注释行（`//`）跳过 —— 解释这段历史时免不了要写出 `atob` 这个词。
+        let bad: Vec<&str> = SHIM
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains("atob("))
+            .filter(|l| !l.starts_with("//"))
+            .filter(|l| !l.starts_with("var bin = atob(b64);"))
+            .collect();
+        assert!(bad.is_empty(), "shim 里有裸 atob（会出乱码）：{bad:?}");
+
+        // 三处调用点都要用 dec
+        for call in ["dec(\"__URL__\")", "dec(\"__NONCE__\")", "var json = dec(b64);", "el.textContent = dec(b64);"] {
+            assert!(SHIM.contains(call), "缺少 UTF-8 解码调用：{call}");
+        }
+    }
+
+    /// 反证：这条路走错会是什么样。把中文按 UTF-8 编出去、再按 Latin-1 读回来，
+    /// 就该得到用户截图里那种 `ä½?…`；而按 UTF-8 读回来必须是原文。
+    #[test]
+    fn utf8_vs_latin1_decoding_differ_on_chinese() {
+        let text = "体验优化";
+        let bytes = text.as_bytes();
+        // Latin-1（等价于裸 atob 的结果）：每个字节一个字符
+        let latin1: String = bytes.iter().map(|&b| b as char).collect();
+        assert_ne!(latin1, text, "按 Latin-1 读必须是乱的（这正是缺陷现场）");
+        assert!(latin1.starts_with('ä'), "乱码形状：{latin1}");
+        // UTF-8：还原
+        assert_eq!(String::from_utf8(bytes.to_vec()).unwrap(), text);
+    }
 }

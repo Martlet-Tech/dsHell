@@ -261,9 +261,18 @@ main {
   background: #2a1d10;
 }
 
+/*
+ * 右列。宽度**由内容决定**（`min-width` + 数字等宽）：日期是不定宽的文本，
+ * 固定 px 会在中英文/不同语言环境里对不齐，而右列参差不齐比不显示更难看。
+ * `tabular-nums` 让 1 与 8 等宽，"列"才真的成一列。
+ */
 .vrow .mark {
   font-size: 12px;
   color: var(--dim2);
+  min-width: 68px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .vrow.cur .mark {

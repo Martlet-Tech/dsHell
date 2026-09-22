@@ -58,6 +58,14 @@ pub struct VItem {
     pub current: bool,
     /// 比当前更旧 —— 切过去是降级，必须警告
     pub older: bool,
+    /// 发布日期，**原样是 registry 给的 RFC3339**（`2026-09-15T03:23:13.750Z`）。
+    ///
+    /// 时区与格式都交给面板的 `Intl` 处理：`toISOString()` 与本地化只差一次
+    /// `new Date(...)`，而**面板不在我们这一侧**——Rust 解析成什么格式都会在
+    /// 面板里再被格式化一遍。原样传递就没有"两边对时区理解不同"的可能。
+    ///
+    /// `None` = 这一版没有发布日期（registry 没给，或老缓存里还没这个字段）。
+    pub published: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -90,10 +98,27 @@ struct RegistryCache {
     versions: Vec<String>,
     /// 版本 → 命中的 dist-tag
     tags: BTreeMap<String, Vec<String>>,
-    /// 版本 → 发布时间（RFC3339）。降级要按它算 `--before`，见 `resolve_before`。
+    /// 版本 → 发布时间（RFC3339）。降级要按它算 `--before`（见 `resolve_before`），
+    /// 面板也拿它显示"发布日期"。
     /// `serde(default)`：这个字段是后加的，老缓存文件里没有，不该因此整个失效。
     #[serde(default)]
     times: BTreeMap<String, String>,
+    /// 抓 `times` 那一刻的 **版本数**。
+    ///
+    /// 为什么要记这个数：`times` 与 `versions` 是**两条** npm 查询的结果，必须能判断
+    /// 前者是不是后者的同一份快照。没有它就会出现下面两种错，而且都真发生过：
+    ///
+    /// * 只在"times 为空"时才抓 —— 于是它一旦落盘就再没人刷新，**新发布的版本永远没有
+    ///   发布日期**（而它们恰恰是用户最想看的那几行），`resolve_before` 也会因为查不到
+    ///   目标版本的时刻而放弃时间窗。
+    /// * 改成"times 条目数少于 versions 就重抓" —— 若 registry 对某一版真的不给时刻，
+    ///   就变成**每次开面板都后台重查**的永久空转。
+    ///
+    /// 记下抓取时的版本数则两种情况都不会发生：新版本一出现 ⇒ `times_seen < 版本数`
+    /// ⇒ 重抓一次 ⇒ 再次相等。`serde(default)` = 0，所以升级前写的缓存会被判为"过期"
+    /// 一次并自愈，正是想要的。
+    #[serde(default)]
+    times_seen: usize,
 }
 
 impl Default for RegistryCache {
@@ -104,6 +129,7 @@ impl Default for RegistryCache {
             versions: Vec::new(),
             tags: BTreeMap::new(),
             times: BTreeMap::new(),
+            times_seen: 0,
         }
     }
 }
@@ -111,6 +137,14 @@ impl Default for RegistryCache {
 impl RegistryCache {
     fn age_ms(&self) -> u64 {
         now_ms().saturating_sub(self.fetched_at_ms)
+    }
+
+    /// 这份 `times` 是不是**当前版本列表**的同一份快照。
+    ///
+    /// 判据是"抓取时的版本数 == 现在的版本数"，理由（以及为什么不写成别的形式）
+    /// 见 `times_seen` 字段的注释。
+    fn times_fresh(&self) -> bool {
+        !self.times.is_empty() && self.times_seen == self.versions.len()
     }
 }
 
@@ -132,7 +166,7 @@ pub fn catalog(force: bool) -> Result<Catalog, String> {
     let cfg = Config::load();
     let path = Some(cfg.child_path_env());
 
-    let (reg, stale) = match if force {
+    let (mut reg, stale) = match if force {
         None
     } else {
         load_cache().filter(|c| !c.versions.is_empty())
@@ -144,6 +178,22 @@ pub fn catalog(force: bool) -> Result<Catalog, String> {
         // 没有缓存：只能现查（首次打开会等几秒，这是唯一一次）
         None => (fetch_registry(&path)?, false),
     };
+
+    // 发布日期与版本列表必须是**同一份快照**（见 `times_seen`）：registry 每次发布新版，
+    // `versions` 一查就有，而 `times` 得再抓一次。这里补上那一次 —— 否则面板上"最新那几个
+    // 版本"恰好没有日期，而降级要用的时间窗也会因为查不到目标时刻而放弃。
+    //
+    // 抓失败不算致命：日期留空，面板其余部分照旧（日期是**锦上添花**，不是功能的门）。
+    if !reg.times_fresh() {
+        match fetch_times(&path) {
+            Ok(times) => {
+                reg.times = times;
+                reg.times_seen = reg.versions.len();
+                save_cache(&reg);
+            }
+            Err(e) => crate::log(&format!("update: could not read publish times ({e})")),
+        }
+    }
 
     let current = npm(
         &["ls", "-g", DSH_PACKAGE, "--depth=0", "--json"],
@@ -175,6 +225,7 @@ pub fn catalog(force: bool) -> Result<Catalog, String> {
                 (Some(v), Some(c)) => v < c,
                 _ => false,
             },
+            published: reg.times.get(&raw).cloned(),
             version: raw,
         })
         .collect();
@@ -264,27 +315,37 @@ pub fn resolve_before(target: &str) -> Option<String> {
     }
 }
 
-/// 各版本的发布时间（走 registry 缓存；没有就查一次并合并进缓存）。
+/// 各版本的发布时间：缓存里那份**与当前版本列表同源**就直接用，否则现查一次。
+///
+/// "同源"的判据是 `times_seen == 当前版本数`，理由见 `times_seen` 字段的注释。
+/// 这一条对降级路径同样要紧：`times` 一旦落后于 `versions`，**最新发布的那一版就不在里面**
+/// —— 而那恰恰是最常见的降级目标，老代码会因此误判成"没有这一版的时刻"、静默放弃时间窗。
 fn version_times() -> Result<BTreeMap<String, String>, String> {
     if let Some(c) = load_cache() {
-        if !c.times.is_empty() {
+        if c.times_fresh() {
             return Ok(c.times);
         }
     }
 
     let cfg = Config::load();
-    let raw = npm(
-        &["view", DSH_PACKAGE, "time", "--json"],
-        Some(cfg.child_path_env()),
-        VIEW_TIMEOUT,
-    )?;
-    let times = parse_times(&raw).ok_or_else(|| "无法解析 npm view time 的输出".to_string())?;
+    let times = fetch_times(&Some(cfg.child_path_env()))?;
 
     // 合并进缓存（不动 versions / tags / registry 那些字段；没有缓存就只为它建一份）
     let mut c = load_cache().unwrap_or_default();
     c.times = times.clone();
+    c.times_seen = c.versions.len();
     save_cache(&c);
     Ok(times)
+}
+
+/// 跑那一条 `npm view … time`，**不碰缓存**（缓存策略由调用方决定）。
+fn fetch_times(path: &Option<String>) -> Result<BTreeMap<String, String>, String> {
+    let raw = npm(
+        &["view", DSH_PACKAGE, "time", "--json"],
+        path.clone(),
+        VIEW_TIMEOUT,
+    )?;
+    parse_times(&raw).ok_or_else(|| "无法解析 npm view time 的输出".to_string())
 }
 
 /// `npm view <pkg> time --json` → 只留形如版本的键（`created` / `modified` 是元数据，
@@ -362,13 +423,16 @@ fn fetch_registry(path: &Option<String>) -> Result<RegistryCache, String> {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
+    let prev = load_cache().unwrap_or_default();
     let cache = RegistryCache {
         fetched_at_ms: now_ms(),
         registry,
         versions,
         tags,
-        // 发布时间是另一个 npm 查询（`view time`）的结果，别在这里把它抹掉
-        times: load_cache().map(|c| c.times).unwrap_or_default(),
+        // 发布时间是另一个 npm 查询（`view time`）的结果，别在这里把它抹掉；
+        // `times_seen` 原样带过来，让 `times_fresh()` 去判断它跟不跟得上新的版本数
+        times: prev.times,
+        times_seen: prev.times_seen,
     };
     save_cache(&cache);
     Ok(cache)
@@ -527,4 +591,80 @@ fn same_dir(a: &str, b: &str) -> bool {
             .to_ascii_lowercase()
     };
     norm(a) == norm(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache(versions: usize, times_seen: usize, times: usize) -> RegistryCache {
+        RegistryCache {
+            versions: (0..versions).map(|i| format!("0.1.{i}")).collect(),
+            times: (0..times)
+                .map(|i| (format!("0.1.{i}"), "2026-09-15T03:23:13.750Z".to_string()))
+                .collect(),
+            times_seen,
+            ..Default::default()
+        }
+    }
+
+    /// "发布时间是不是当前版本列表的同一份快照" —— 三种情形各自判对。
+    ///
+    /// 这条判错的方向很隐蔽：判成"新鲜"会让**新发布的版本没有日期**（用户最想看的那几行），
+    /// 判成"不新鲜"则每次开面板都多一条 npm 查询。
+    #[test]
+    fn times_are_fresh_only_for_the_same_version_snapshot() {
+        assert!(cache(5, 5, 5).times_fresh(), "版本数对得上 ⇒ 同一份快照");
+        assert!(!cache(6, 5, 5).times_fresh(), "又发布了新版 ⇒ 落后，要重抓");
+        assert!(!cache(0, 0, 0).times_fresh(), "什么都没有 ⇒ 不算新鲜");
+        // registry 少给某一版的时刻：条目数少于版本数，但 times_seen 对得上 ⇒
+        // 仍然算新鲜。否则会变成"每次开面板都重抓"的永久空转。
+        assert!(cache(5, 5, 4).times_fresh(), "个别版本没时刻不该导致永久重抓");
+    }
+
+    /// 升级前落盘的缓存里没有 `times_seen`：必须反序列化成 0（= 不新鲜），
+    /// 于是升级后第一次开面板会自愈地补一次发布时间，而不是一直显示空白。
+    #[test]
+    fn cache_written_before_this_field_heals_once() {
+        let old = r#"{"fetched_at_ms":1,"registry":"r","versions":["0.1.0","0.1.1"],
+                      "tags":{},"times":{"0.1.0":"2026-09-15T03:23:13.750Z"}}"#;
+        let c: RegistryCache = serde_json::from_str(old).expect("老缓存必须还能读");
+        assert_eq!(c.times_seen, 0);
+        assert!(!c.times_fresh(), "老缓存要判为落后一次，才能补上发布日期");
+    }
+
+    /// `npm view time` 的元数据键与非时间戳值都不该混进发布时间表。
+    #[test]
+    fn parse_times_keeps_only_version_keys_with_real_timestamps() {
+        let raw = r#"{"created":"2026-08-13T12:35:18.048Z",
+                      "modified":"2026-09-22T06:32:09.244Z",
+                      "0.1.5-rc.2":"2026-09-10T14:57:10.790Z",
+                      "0.1.7-alpha.1":"2026-09-22T06:23:31.522Z",
+                      "0.1.9":"not-a-time"}"#;
+        let t = parse_times(raw).expect("能解析");
+        assert_eq!(t.len(), 2, "created/modified/坏时间戳都要被滤掉");
+        assert_eq!(t.get("0.1.5-rc.2").map(String::as_str), Some("2026-09-10T14:57:10.790Z"));
+        assert!(t.contains_key("0.1.7-alpha.1"));
+    }
+
+    /// 面板拿到的 JSON 里必须有 `published`，且**原样**是 registry 的 RFC3339。
+    ///
+    /// 这条守的是 Rust → 面板那一段契约：`settings.rs` 把整个 `Catalog` 交给
+    /// `serde_json::json!` 再 `eval` 给面板，中间**没有字段白名单** —— 所以字段一旦
+    /// 改了名或忘了 `Serialize`，编译不会报错，只会让面板右列静默变空。
+    #[test]
+    fn published_reaches_the_panel_verbatim() {
+        let item = VItem {
+            version: "0.1.6-alpha.1".into(),
+            tags: vec!["alpha".into()],
+            current: false,
+            older: true,
+            published: Some("2026-09-15T03:23:13.750Z".into()),
+        };
+        let v = serde_json::to_value(&item).expect("能序列化");
+        assert_eq!(v["published"], "2026-09-15T03:23:13.750Z", "时刻原样传，不在 Rust 侧改写");
+        // 没有发布时间的版本要序列化成 `null`（面板据此不显示），而不是字段整个消失
+        let none = VItem { published: None, ..item };
+        assert!(serde_json::to_value(&none).expect("能序列化")["published"].is_null());
+    }
 }

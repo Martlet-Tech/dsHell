@@ -94,7 +94,6 @@ window.addEventListener("message", (e) => {
   } else if (msg.type === "error") {
     S.error = msg.text;
     S.busy = false;
-  }
   render();
 });
 
@@ -271,7 +270,19 @@ function row(v) {
 
   const mark = document.createElement("span");
   mark.className = "mark";
-  mark.textContent = v.current ? "当前版本" : v.older ? "更旧" : "";
+
+  // 右列：**当前版本**那行说"当前版本"（那是用户第一眼要找的信息），
+  // 其余行说发布日期；两者都缺就空着 —— 不写"未知"占位，那会把一列日期变成一列噪声。
+  if (v.current) {
+    mark.textContent = "当前版本";
+  } else {
+    const date = dateText(v.published);
+    if (date) {
+      mark.textContent = date;
+      // 完整时刻放 title：压缩过的日期看不出时区，鼠标一悬停就有确切值
+      mark.title = fullDateText(v.published);
+    }
+  }
 
   li.append(tick, ver, badges, mark);
   li.onclick = () => {
@@ -281,7 +292,40 @@ function row(v) {
     }
     updateSel();
   };
+
   return li;
+}
+
+/**
+ * registry 给的 RFC3339 → 面板上那一列短日期。
+ *
+ * 三条约定：
+ *
+ *   * **按本地时区显示**。registry 一律是 UTC（`…Z`），而"哪天发的"对用户是按自己
+ *     的钟说的；`new Date()` + `Intl` 干的就是这件事，不需要我们掺和。
+ *   * **年份只在不是今年时出现**。列表全是同年的版本时，一列 `2026-09-10` 里那个
+ *     `2026` 重复 24 遍、白占宽度；跨年了才把它露出来。
+ *   * **解析不了就返回空串**（老缓存 / registry 没给时刻），由调用方决定不显示 —— 
+ *     `new Date("")` 是 Invalid Date，`toLocaleDateString` 会吐 "Invalid Date" 上屏。
+ */
+function dateText(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString("zh-CN", {
+    year: sameYear ? undefined : "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
+/** 完整到分钟的本地时刻，给 `title` 用（悬停才看到，所以不吝长度）。 */
+function fullDateText(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("zh-CN", { hour12: false });
 }
 
 function updateSel() {
@@ -309,10 +353,14 @@ function askSwitch() {
   const older = !!(item && item.older);
 
   $("m-title").textContent = older ? "降级 dsh？" : "切换 dsh 版本";
+  // 目标版本的发布日期：降级场景下它是**决策依据**（越旧的版本越可能踩到已有的坑），
+  // 所以确认框里也给它一个位置，而不是只在列表上闪一下。
+  const when = dateText(item && item.published);
+  const stamp = when ? `（${when} 发布）` : "";
   $("m-body").textContent =
     target === cur
-      ? `重新安装 ${target}（等同修复一次安装）。\n\ndsh 会先停止，装完自动重启。`
-      : `当前 ${cur || "未知"} → 目标 ${target}。\n\ndsh 会先停止，装完自动重启，进行中的对话会中断。`;
+      ? `重新安装 ${target}${stamp}（等同修复一次安装）。\n\ndsh 会先停止，装完自动重启。`
+      : `当前 ${cur || "未知"} → 目标 ${target}${stamp}。\n\ndsh 会先停止，装完自动重启，进行中的对话会中断。`;
 
   const warn = $("m-warn");
   const risks = [];

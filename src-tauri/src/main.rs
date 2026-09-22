@@ -21,6 +21,7 @@ mod lifecycle;
 mod picker;
 mod plugin;
 mod proc;
+mod release_notes;
 mod settings;
 mod tray;
 mod ui_text;

@@ -131,14 +131,37 @@ npm / pnpm**，用户双击即用。
 
 ![首次运行的环境体检](docs/screenshots/env-helper.png)
 
+## 设置与 dsh 版本管理
+
+托盘 →「设置」打开一个**主窗口内的覆盖层**（不是独立窗口，dsh 页面不重载，进行中的对话不中断）。
+
+「dsh 版本管理」把 registry 上所有发布过的版本列出来，最新的在上：
+
+- 右列是该版本的**发布日期**（按本机时区；同年不显示年份）。列表因此本身就是一条时间线。
+- **点日期**看这一版改了什么。更新内容取自 GitHub Releases 的中文说明，**按需拉取**并缓存 2 小时 —— 不点就不联网。dsh 的 npm 包里没有任何 changelog 字段，这是唯一的来源。
+- 选中一版点「切换」：dsh 先停止 → `npm i -g` → 装完自动重启。
+
+**降级会被拦一道**：dsh 的同级包用 `^` 引用，直接装旧版会配到新版依赖，装出一棵起不来的树
+（实测 `0.1.6-alpha.1` 就是这样）。所以降级除了警告与二次确认，还会用**发布时间窗**
+（`npm --before`）安装，把依赖解析拉回那一版发布时的样子。
+
+![设置面板的 dsh 版本管理：列出各版本、发布日期与更新内容](docs/screenshots/update.png)
+
+> 那份 2 小时的 registry 缓存同时会显示"数据 N 分钟前"，过期时先用旧数据把面板画出来、
+> 再后台重查覆盖 —— 不让用户对着"正在查询"发呆。
+
 ## 文件
 
 ```
 src-tauri/src/main.rs        启动、体检编排、handoff、托盘
 src-tauri/src/picker.rs      原生目录选择框服务（只监听回环 + 共享令牌）
 src-tauri/src/plugin.rs      自带插件的自动安装（复制进 dsh profile + 登记 bundle）
+src-tauri/src/settings.rs    设置面板：注入覆盖层 shim + 回环回传端点
+src-tauri/src/update.rs      dsh 版本台账：registry 查询、semver 排序、来源校验、发布时刻
+src-tauri/src/release_notes.rs  从 GitHub Releases 取各版更新内容（按需 + 缓存）
 src-tauri/tauri.conf.json    Tauri 配置
 ui/index.html                启动页（深色流光动画，无外部依赖）
+ui/settings.html             设置面板（跑在主窗口的覆盖层 iframe 里）
 plugin/dshell-directory-picker/  把 dsh 的选目录转交给壳层的 dsh 插件（随 exe 发布）
 scripts/dev-build.ps1        开发构建（产物在 target\<时间戳>\，exe + plugin\）
 scripts/install-picker-plugin.ps1  手动装/卸上面那个插件（诊断与开发期兜底）
@@ -147,6 +170,8 @@ scripts/install-picker-plugin.ps1  手动装/卸上面那个插件（诊断与�
 ```
 
 刻意不使用 Tauri IPC——DSH UI 只跟自己的后端走 HTTP/WebSocket，壳就只是壳。
+设置面板同样不走 IPC：它回传动作靠 loopback 上的 `sendBeacon`（路径带每次启动的随机
+nonce），这样就不必给 dsh 页面的 origin 开任何命令权限。
 
 ## 更多
 

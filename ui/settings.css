@@ -198,6 +198,9 @@ main {
   border-radius: 9px;
   cursor: pointer;
   user-select: none;
+  /* 展开的更新内容要**换到自己那一行**（它带 `flex-basis:100%`），
+     否则会挤进这条 flex 行里、把版本号压扁 */
+  flex-wrap: wrap;
 }
 
 .vrow:hover {
@@ -277,6 +280,96 @@ main {
 
 .vrow.cur .mark {
   color: var(--accent-soft);
+}
+
+/* 日期做成按钮：它是"看这版改了什么"的入口，但外观仍是一枚安静的时间戳 */
+.mark .notes {
+  background: none;
+  border: 0;
+  padding: 1px 4px;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: inherit;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.mark .notes:hover {
+  color: var(--accent-soft);
+  background: #16233a;
+  text-decoration: underline;
+}
+
+.mark .notes:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ── 更新内容面板（挂在展开的那一行下面）────────────────────── */
+
+.notesbox {
+  flex-basis: 100%; /* 换到自己那一行 */
+  margin: 6px 0 2px;
+  padding: 10px 14px;
+  border-left: 2px solid #2f4062;
+  background: #0d1420;
+  border-radius: 0 8px 8px 0;
+  cursor: default;
+  user-select: text;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.notebody h4 {
+  margin: 10px 0 4px;
+  font-size: 12.5px;
+  color: var(--accent-soft);
+}
+
+.notebody h4:first-child {
+  margin-top: 0;
+}
+
+.notebody p {
+  margin: 3px 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: #cbd5e1;
+}
+
+.notebody p.li {
+  padding-left: 8px;
+  text-indent: -8px; /* 折行后与首行对齐 */
+}
+
+.notehint {
+  margin: 2px 0;
+  font-size: 12.5px;
+  color: var(--dim2);
+}
+
+.notehint.bad {
+  color: var(--bad);
+}
+
+.notebox .retry {
+  margin-top: 6px;
+  font-size: 12px;
+  padding: 2px 10px;
+}
+
+.notefoot {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  color: var(--dim2);
+}
+
+.notefoot code {
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--dim);
+  word-break: break-all;
 }
 
 .more {

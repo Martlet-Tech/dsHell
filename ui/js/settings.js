@@ -50,6 +50,10 @@ const S = {
   rendered: 0,
   primed: false,
   busy: false,
+  /** 版本 → 更新内容的取用状态：`loading` / `ok`（带 note）/ `missing` / `error` */
+  notes: new Map(),
+  /** 当前展开着更新内容的版本（同时只展开一个） */
+  notesOpen: null,
 };
 
 // ───────────────────────── 与壳层通信 ─────────────────────────
@@ -94,6 +98,18 @@ window.addEventListener("message", (e) => {
   } else if (msg.type === "error") {
     S.error = msg.text;
     S.busy = false;
+  } else if (msg.type === "notes") {
+    S.notes.set(msg.note.version, { state: "ok", note: msg.note });
+    return redrawRows();
+  } else if (msg.type === "notes_missing") {
+    // registry 里有这一版、GitHub 上没有对应 release（实测 7 个）—— 不是错误
+    S.notes.set(msg.version, { state: "missing" });
+    return redrawRows();
+  } else if (msg.type === "notes_error") {
+    // 拉取失败**不影响列表**：那一行只是显示"拉取失败 + 重试"
+    S.notes.set(msg.version, { state: "error", text: msg.text });
+    return redrawRows();
+  }
   render();
 });
 
@@ -278,9 +294,18 @@ function row(v) {
   } else {
     const date = dateText(v.published);
     if (date) {
-      mark.textContent = date;
-      // 完整时刻放 title：压缩过的日期看不出时区，鼠标一悬停就有确切值
-      mark.title = fullDateText(v.published);
+      // 日期本身就是"看这版改了什么"的入口：做成按钮（可聚焦、可键盘触发），
+      // 而不是把整行变成开关 —— 整行的点击仍然是**选中这一版**。
+      const btn = document.createElement("button");
+      btn.className = "notes";
+      btn.type = "button";
+      btn.textContent = date;
+      btn.title = `${fullDateText(v.published)} — 查看更新内容`;
+      btn.onclick = (e) => {
+        e.stopPropagation(); // 不许冒泡成"选中这一版"
+        toggleNotes(v.version);
+      };
+      mark.appendChild(btn);
     }
   }
 
@@ -293,7 +318,122 @@ function row(v) {
     updateSel();
   };
 
+  // 展开的那一行，把更新内容面板挂在它下面（同一个 li，避免破坏列表结构）
+  if (S.notesOpen === v.version) {
+    li.appendChild(notesPanel(v.version));
+  }
   return li;
+}
+
+/** 点日期：展开 / 收起该版本的更新内容；首次展开时去要数据。 */
+function toggleNotes(version) {
+  S.notesOpen = S.notesOpen === version ? null : version;
+  if (S.notesOpen && !S.notes.has(version)) {
+    S.notes.set(version, { state: "loading" });
+    beacon("notes?version=" + encodeURIComponent(version));
+  }
+  redrawRows();
+}
+
+/**
+ * 只重画列表里已经渲染出来的那些行（不重置分页游标）。
+ *
+ * 不能直接调 `renderVersions()`：那会把 `S.rendered` 归零、重新 observe 一次，
+ * 用户明明已经滚到第 30 行，展开一条更新内容就被拽回顶部。
+ */
+function redrawRows() {
+  const list = $("v-list");
+  if (!list || !S.catalog) return;
+  const rows = Array.from(list.querySelectorAll(".vrow"));
+  const next = S.catalog.versions.slice(0, rows.length);
+  list.textContent = "";
+  for (const v of next) list.appendChild(row(v));
+}
+
+/**
+ * 更新内容面板。
+ *
+ * **渲染约定**：正文是 GitHub 上的**未受信外部文本**，一律只经 `textContent`
+ * 建文本节点，绝不 `innerHTML`。面板手里握着 `switch?version=` 那条回传通道，
+ * 一旦让外部文本进 DOM 解析，就等于把"切换 dsh 版本"这个动作暴露给它。
+ * Rust 侧已经把正文压成纯文本 + 三种记号（`### ` 标题、`- ` 列表、其余为段落），
+ * 这里只按行分派。
+ */
+function notesPanel(version) {
+  const box = document.createElement("div");
+  box.className = "notesbox";
+
+  const st = S.notes.get(version) || { state: "loading" };
+
+  if (st.state === "loading") {
+    box.appendChild(line("notehint", "正在读取更新内容…"));
+    return box;
+  }
+  if (st.state === "missing") {
+    box.appendChild(line("notehint", "这一版没有发布说明（GitHub 上没有对应的 release）。"));
+    return box;
+  }
+  if (st.state === "error") {
+    box.appendChild(line("notehint bad", "拉取失败：" + (st.text || "未知原因")));
+    const retry = document.createElement("button");
+    retry.className = "retry";
+    retry.textContent = "重试";
+    retry.onclick = (e) => {
+      e.stopPropagation();
+      S.notes.delete(version);
+      S.notes.set(version, { state: "loading" });
+      beacon("notes?version=" + encodeURIComponent(version));
+      redrawRows();
+    };
+    box.appendChild(retry);
+    return box;
+  }
+
+  const body = document.createElement("div");
+  body.className = "notebody";
+  const text = (st.note && st.note.body) || "";
+  if (!text.trim()) {
+    body.appendChild(line("notehint", "这一版的发布说明是空的。"));
+  } else {
+    for (const raw of text.split("\n")) {
+      const l = raw.trimEnd();
+      if (!l.trim()) continue;
+      if (l.startsWith("### ")) {
+        const h = document.createElement("h4");
+        h.textContent = l.slice(4).trim(); // 小标题
+        body.appendChild(h);
+      } else if (/^[-*]\s+/.test(l)) {
+        const p = document.createElement("p");
+        p.className = "li";
+        p.textContent = "· " + l.replace(/^[-*]\s+/, "");
+        body.appendChild(p);
+      } else {
+        body.appendChild(line("p", l));
+      }
+    }
+  }
+  box.appendChild(body);
+
+  // 出处 + 可复制的链接（**不做导航**：面板里点链接去开浏览器不是这个面板的职责，
+  // 而且那会绕开壳层的外链拦截约定）
+  const foot = document.createElement("div");
+  foot.className = "notefoot";
+  const src = document.createElement("span");
+  src.textContent = (st.note && st.note.cached ? "来自缓存" : "来自 GitHub") + " · ";
+  const url = document.createElement("code");
+  url.textContent = (st.note && st.note.url) || "";
+  foot.append(src, url);
+  box.appendChild(foot);
+
+  box.onclick = (e) => e.stopPropagation(); // 面板内的点击不改变选中项
+  return box;
+}
+
+function line(cls, text) {
+  const el = document.createElement("p");
+  el.className = cls;
+  el.textContent = text;
+  return el;
 }
 
 /**

@@ -341,6 +341,19 @@ fn handle(mut stream: TcpStream, app: &AppHandle) -> std::io::Result<()> {
             crate::log("settings: panel asked to refresh the catalog");
             push_data_forced(app);
         }
+        "notes" => {
+            let Some(version) = query_param(query, "version") else {
+                return picker::write_json(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    r#"{"ok":false,"error":"version required"}"#,
+                );
+            };
+            // 回传端点**必须立刻返回**：这是面板发的一次 beacon，拿不到响应，
+            // 结果走 push。拉取要联网 ~1s，不能占住这个连接线程。
+            push_notes_async(app, version);
+        }
         "cancel" => {
             set_selected(None);
             crate::log("settings: cancelled (selection discarded)");
@@ -510,6 +523,41 @@ fn push(app: &AppHandle, msg: serde_json::Value) {
         "window.__dshellSettings&&window.__dshellSettings.push('{}')",
         crate::b64(&msg.to_string())
     ));
+}
+
+/// 面板点了某一版的「更新内容」→ 后台取一次发布说明再推回去。
+///
+/// 三条口径：
+///
+/// * **放后台线程**：拉取要联网（实测 ~1.1 s），不能占住回传端点那个连接线程。
+/// * **失败只推 `notes_error`**：面板把已展开的窗口留成"拉取失败 + 可重试"，
+///   列表本身一点都不受影响（与 `refresh_error` 同一处置）。
+/// * **`Ok(None)` 不是错误**：registry 里有这一版、GitHub 上没有对应 release
+///   （实测 7 个），面板显示"这一版没有发布说明"。
+fn push_notes_async(app: &AppHandle, version: String) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        match crate::release_notes::notes(&version) {
+            Ok(Some(note)) => {
+                crate::log(&format!(
+                    "notes: {} ({} 字符, url={}, cached={})",
+                    note.version,
+                    note.body.chars().count(),
+                    note.url,
+                    note.cached
+                ));
+                push(&app, json!({ "type": "notes", "note": note }));
+            }
+            Ok(None) => {
+                crate::log(&format!("notes: {version} has no GitHub release"));
+                push(&app, json!({ "type": "notes_missing", "version": version }));
+            }
+            Err(e) => {
+                crate::log(&format!("notes: {version} failed: {e}"));
+                push(&app, json!({ "type": "notes_error", "version": version, "text": e }));
+            }
+        }
+    });
 }
 
 fn selected() -> Option<String> {

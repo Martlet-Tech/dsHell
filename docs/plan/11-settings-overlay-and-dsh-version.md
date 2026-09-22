@@ -602,6 +602,62 @@ install dsh: resolving as of 2026-09-16T08:37:41.975Z
 `postMessage`）要开一次真面板才看得到。预期日志不变（`catalog ok (…)`），判据是**列表右列
 出现日期**（而不是"更旧"）。
 
+### 第六轮：列表里看更新内容（2026-09-23）
+
+用户："要是能有版本的修改内容就好了 / 拉版本信息的时候有没有更新内容"。
+
+**答案：npm 里没有，GitHub Releases 里有。** 实测（见 `design.md` 的表）：单版本
+`changelog` / `gitHead` **0/25**，仓库里 `CHANGELOG.md` **不存在**；而 GitHub Releases
+有 **20 条中英双语**，覆盖 18/25 个版本。
+
+**落点**（用户选 A）：列表右列那个日期本身变成按钮，点开在该行下面展开该版更新内容。
+
+| 项 | 做法 |
+| --- | --- |
+| 数据源 | `GET /repos/deepseek-ai/deepseek-harness/releases?per_page=100`（公开，**无需 token**） |
+| 换取方式 | `node -e fetch(...)`（理由见 `design.md`：node 是既有硬依赖；`curl` 本机 schannel 报 `SEC_E_NO_CREDENTIALS`） |
+| 时机 | **懒加载**：点日期才拉，不进 `catalog()`；首屏 npm 调用**一次都没多** |
+| 缓存 | `%USERPROFILE%\.dshell\dsh-releases.json`，2 小时 TTL；一条请求拿回全部 20 条，之后点任何版本瞬开 |
+| 展示 | **中文段**原文（切掉英文段），`### ` 小标题加粗 + `- ` 列表；底部给"来自 GitHub / 来自缓存"+ release 地址（**纯文本，不做导航**） |
+| 拿不到时 | 三态各说各的话：`notes_missing`=这一版没有说明 / `notes_error`=拉取失败 + 重试 / 空正文=说它空。**列表本身一律不受影响** |
+
+**未受信文本的处理**（这条是重点）：release 正文是外部文本，而面板握着
+`switch?version=` 那条能真的换版本的通道。所以 Rust 侧把正文压成**纯文本 + 三种记号**、
+尖括号清零，面板侧**只 `textContent`、从不 `innerHTML`**。
+
+**改动**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `src-tauri/src/release_notes.rs` | **新增**：`notes()` / `extract_cn()` / `normalize_markup()` / `parse_releases()` / 磁盘缓存；8 条单测 |
+| `src-tauri/src/settings.rs` | 新回传动作 `notes?version=` + `push_notes_async`（后台线程 + 三态推送） |
+| `src-tauri/src/main.rs` | `mod release_notes;` |
+| `ui/js/settings.js` | `toggleNotes()` / `notesPanel()` / `redrawRows()`；日期改成按钮 |
+| `ui/settings.css` | `.mark .notes` 按钮态、`.notesbox` 展开面板（`flex-basis:100%` 换行） |
+
+**验证**（2026-09-23）：
+
+| # | 项 | 结果 |
+| --- | --- | --- |
+| 1 | `cargo test --bins` | ✅ **18 passed**（原 10 + 新增 8） |
+| 2 | **全量核对 20 条真正文** | ✅ 20/20：中文段非空、英文段残留 0、**残留标签 0** |
+| 3 | 真连一次 GitHub | ✅ `node -e fetch` → 1117 ms / 140 KB → 解析出 **20 条**；`0.1.7-alpha.2` / `0.1.5-rc.2` / `0.1.6-alpha.2` 三版正文抽得正确 |
+| 4 | **面板端到端渲染** | ✅ 用**Rust 真实抽取出来的**正文喂**未改动的** `ui/js/settings.js`（走真 `postMessage`，并由页面自己 `btn.click()` 触发真 `onclick`）：`0.1.7-alpha.2` 展开出「体验优化 / 问题修复 / 其他变更」三节，缩进、加粗标题、底部出处都对（无头 Edge 截图） |
+| 5 | 真机端到端 | ⏳ **待用户实测**（见遗留项 3） |
+
+产物：`src-tauri\target\20260923-010238\`（用 `scripts/dev-build.ps1` 出的，
+时间戳目录 —— 当时有一个实例正跑着并锁着 `target-build\release\dshell.exe`，
+固定路径**编不进去**；这正是那个脚本存在的理由）。
+
+**这一轮的实际收获是两个只有"全量核对"才暴露的缺陷**（都不是我最初 3 个手挑夹具能覆盖的）：
+
+| # | 缺陷 | 后果 |
+| --- | --- | --- |
+| 1 | `0.1.5-rc.1` 的**中文段内部**自带一行 `Full Changelog`，其后还有英文散文 | 只按英文锚点切 → **英文段的 `### Bug Fixes` 混进中文段** |
+| 2 | 缓存里"没有这一版"分不清**问过没有**与**还没问** | 前者每次点都重拉网络；后者会把**刚发布的版本**判成"没有说明"直到 TTL 过期（最长 2 小时） |
+
+第 1 条已固化成单测；第 2 条用 `absent` 集合解决（`NotesCache.absent`）。
+
 ### 遗留项
 
 1. ~~**每开一次面板跑 5 条 npm 命令**~~ → **已做**（2026-09-21）：registry 那半边 2 小时磁盘缓存 +

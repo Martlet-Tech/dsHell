@@ -252,6 +252,78 @@ R18 那次为什么得出相反结论：它的判据是"探针用 `sendBeacon` �
 （`times_seen`，`#[serde(default)]` = 0）：新版本一出现 ⇒ `times_seen < versions.len()`
 ⇒ 重抓一次 ⇒ 再次相等。老缓存因为缺这个字段被判为落后一次，**自愈**地补上，正是想要的。
 
+## 更新内容只能从 GitHub Releases 拿，npm 里没有
+
+用户问"拉版本信息的时候有没有更新内容"。**npm 侧一点都没有**（2026-09-23 实测）：
+
+| 来源 | 结果 |
+| --- | --- |
+| 单版本 manifest 的 `changelog` / `changes` / `releaseNotes` | **0/25 个版本有** |
+| 单版本 `gitHead`（拿它也还得自己去比对 commit） | **0/25** |
+| packument 顶层 | 只有 `readme`（包说明，不是更新日志） |
+| 仓库里的 `CHANGELOG.md` | **不存在**（`/`、`/docs/`、`/apps/cli/` 三个路径全 404） |
+| 已安装包内 | 只有第三方依赖自己的 CHANGELOG |
+| **GitHub Releases** | ✅ **20 条，中英双语**（新增功能 / 问题修复 / 其他变更） |
+
+覆盖 18/25 个已发布版本；缺的 7 个是 6 个远古版（`0.0.1-rc.*` / `0.1.0-rc.*`）加
+`0.1.5-rc.3`（发了 npm 但没建 release）。**拉不到不是错误**，面板照常显示列表。
+
+### 用 node 去拉，不引 HTTP 依赖，也不用 curl
+
+`release_notes.rs` 通过 `node -e fetch(...)` 发这一次 GET。理由与 `update::midpoint` 同源：
+**node 从来就是这个应用的硬依赖**（npm 与 dsh 都跑在它上面），而为一个 GET 引
+`ureq` / `reqwest` 是一笔真实的依赖与编译代价。
+
+`curl` **实测也不行**：本机 schannel 直接 `SEC_E_NO_CREDENTIALS`，不是"能不能带参数"的问题。
+
+| 实测（2026-09-23 本机） | 值 |
+| --- | --- |
+| `node -e fetch` 拉 100 条 | **1117 ms** / 140 KB |
+| 匿名限流 | **60/h**（`x-ratelimit-remaining: 56`） |
+| 面板实际频率 | 2 小时缓存 + **只在用户点开某一版时**才查 → 绰绰有余，无需 token |
+
+### 懒加载：不进 `catalog()`
+
+更新内容**不进**首屏那次查询。面板首屏仍只跑本地命令 + 缓存的 registry；
+用户点某一行的日期才去拉一次全量（一条请求拿回全部 20 条），之后点任何版本都是瞬开。
+
+### 正文渲染：绝不让外部文本进 DOM 解析
+
+release 正文是**未受信的外部文本**，而面板手里握着 `switch?version=` 那条回传通道
+（能真的让 dsh 换版本）。所以：
+
+| 层 | 做法 |
+| --- | --- |
+| `release_notes::extract_cn` | 切出中文段 |
+| `release_notes::normalize_markup` | 压成**纯文本 + 三种记号**：`### ` 标题、`- ` 列表、其余段落；**所有尖括号清零** |
+| `ui/js/settings.js` | 只按行 `textContent` 建文本节点，**从不 `innerHTML`** |
+
+面板侧那条约定由 Rust 的 `markup_is_flattened_to_a_tiny_markdown_subset` 守着：
+它断言抽取结果里**一个 `<` 都不许剩**。
+
+### 抽取规则是**实测**定的，不是猜的
+
+这批 release 的排版换过三次，三种都在单测里：
+
+| 形状 | 例 |
+| --- | --- |
+| `<h3 id="cn-vX">` … `<h3 id="en-vX">` | 18/20 条 |
+| `<h2 id="chinese">X · 中文</h2>` … `<h2 id="english">` | `0.1.3-alpha.2` |
+| `<h3 id="cn">` … `<h3 id="en">` | `0.1.0-rc.7` |
+
+所以判据是**锚点 id 的前缀**（`cn`/`chinese`/`en`/`english`），不是某个固定字符串。
+
+**全量核对（20 条真正文）揪出一个只有 1 条命中的坑**：`0.1.5-rc.1` 的**中文段内部**
+自己带一行 `Full Changelog`，其后是一段英文散文，然后才是英文锚点。只按"英文锚点"
+切除的话，那段英文的 `### Bug Fixes` 会跟着切进中文段。修法是段内也按 `Full Changelog`
+切一刀 —— 而这条**我最早手挑的 3 个夹具全都没覆盖**（挑的是典型形状，恰好漏掉唯一那条）。
+现已固化成 `truncates_at_full_changelog_inside_the_chinese_section`。
+
+`absent` 集合：缓存里"没有这一版"必须区分**问过没有**与**还没问**。不区分的话，
+每次点一个没有 release 的旧版都要重拉一次；反过来一律信"缓存里没有就是没有"，
+则**刚发布的版本**会被判成"没有说明"直到 TTL 过期（最长 2 小时）—— 而那恰恰是
+用户最想看的一版。
+
 ## 降级为什么要带"发布时间窗"（npm `--before`）
 
 dsh 对同级的 `@deepseek-ai/*` 包用 `^` 范围引用，所以**朴素地装旧版会配到新版依赖**：
